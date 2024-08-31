@@ -16,6 +16,7 @@ class DataPrep:
         
         self.parent_path = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
         self.data_path = os.path.join(self.parent_path, "data")
+        self.bbg_path = r"C:\Users\Diego\Desktop\app_prod\BBGData\data"
         
         if os.path.exists(self.data_path) == False: os.makedirs(self.data_path)
         
@@ -31,7 +32,7 @@ class DataPrep:
         path = os.path.join(self.data_path, "TSYFredYields.parquet")
         try:
             
-            print("Searching for data")
+            print("Searching for Treasury data")
             df_out = pd.read_parquet(path = path, engine = "pyarrow")
             print("Found Data")
             
@@ -47,3 +48,36 @@ class DataPrep:
             df_out.to_parquet(path = path, engine = "pyarrow")
             
         return df_out
+    
+    def get_labor_sentiment(self) -> pd.DataFrame:
+        
+        in_path = os.path.join(self.bbg_path, "BENLPFED.parquet")
+        read_path = os.path.join(self.data_path, "LaborSentiment.paruqet")
+        
+        try:
+            
+            print("Searching for Labor Data")
+            df_out = pd.read_parquet(path = read_path, engine = "pyarrow")
+            print("Found Data")
+            
+        except: 
+        
+            print("Collecting Data")    
+            df_out = (pd.read_parquet(
+                path = in_path, engine = "pyarrow").
+                assign(
+                    date = lambda x: pd.to_datetime(x.date).dt.date,
+                    security = lambda x: x.security.str.split(" ").str[0]).
+                drop(columns = ["variable"]).
+                pivot(index = "date", columns = "security", values = "value"))
+            
+            df_out.to_parquet(path = read_path, engine = "pyarrow")
+        
+        return df_out
+                
+def main():
+    
+    DataPrep().get_tsy_yields()
+    DataPrep().get_labor_sentiment()
+    
+if __name__ == "__main__": main()

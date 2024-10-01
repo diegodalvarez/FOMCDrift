@@ -17,6 +17,8 @@ class DataPrep:
         self.parent_path = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
         self.data_path = os.path.join(self.parent_path, "data")
         self.bbg_path = r"C:\Users\Diego\Desktop\app_prod\BBGData\data"
+        self.fut_path = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager\data\PXFront"
+        self.deliv_path = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager\data\BondDeliverableRisk"
         
         if os.path.exists(self.data_path) == False: os.makedirs(self.data_path)
         
@@ -34,7 +36,7 @@ class DataPrep:
             
             print("Searching for Treasury data")
             df_out = pd.read_parquet(path = path, engine = "pyarrow")
-            print("Found Data")
+            print("Found Data\n")
             
         except:
             
@@ -58,7 +60,7 @@ class DataPrep:
             
             print("Searching for Labor Data")
             df_out = pd.read_parquet(path = read_path, engine = "pyarrow")
-            print("Found Data")
+            print("Found Data\n")
             
         except: 
         
@@ -74,10 +76,69 @@ class DataPrep:
             df_out.to_parquet(path = read_path, engine = "pyarrow")
         
         return df_out
+    
+    def get_fut_data(self) -> pd.DataFrame:
+        
+        read_path = os.path.join(self.data_path, "FuturesData.parquet")
+        
+        try:
+            
+            print("Searching for Futures Data")
+            df_out = pd.read_parquet(path = read_path, engine = "pyarrow")
+            print("Found Data\n")
+            
+        except: 
+        
+            print("Collecting Data")
+            tickers = ["TU", "TY", "US", "FV", "UXY", "WN", "ES", "UX"]
+            paths = [os.path.join(
+                self.fut_path, ticker + ".parquet") 
+                for ticker in tickers]
+            
+            df_out = (pd.read_parquet(
+                path = paths, engine = "pyarrow").
+                assign(date = lambda x: pd.to_datetime(x.date)))
+        
+            df_out.to_parquet(path = read_path, engine = "pyarrow")
+        
+        return df_out
+    
+    def get_bond_deliverables(self) -> pd.DataFrame: 
+        
+        read_path = os.path.join(
+            self.data_path, "TreasuryDeliverables.parquet")
+        
+        try:
+            
+            print("Searching for Bond Future Deliverables")
+            df_out = pd.read_parquet(path = read_path, engine = "pyarrow")
+            print("Found Data\n")
+            
+        except: 
+        
+            print("Collecting Data")
+            tickers = ["TU", "TY", "US", "FV", "UXY", "WN"]
+            paths = [os.path.join(
+                self.deliv_path, ticker + ".parquet")
+                for ticker in tickers]
+            
+            df_out = (pd.read_parquet(
+                path = paths, engine = "pyarrow").
+                assign(date = lambda x: pd.to_datetime(x.date)))
+            
+            df_out.to_parquet(path = read_path, engine = "pyarrow")
+        
+        return df_out
+        
+        
                 
 def main():
     
-    DataPrep().get_tsy_yields()
-    DataPrep().get_labor_sentiment()
+    data_prep = DataPrep()
+    
+    data_prep.get_tsy_yields()
+    data_prep.get_labor_sentiment()
+    data_prep.get_fut_data()
+    data_prep.get_bond_deliverables()
     
 if __name__ == "__main__": main()

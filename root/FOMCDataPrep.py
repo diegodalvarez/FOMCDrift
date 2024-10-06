@@ -129,6 +129,30 @@ class DataPrep:
             df_out.to_parquet(path = read_path, engine = "pyarrow")
         
         return df_out
+    
+    def get_fedfunds_data(self) -> pd.DataFrame: 
+        
+        read_path = os.path.join(self.data_path, "FedFundsRate.parquet")
+        try:
+            
+            print("Searching for Fed Funds Future Data")
+            df_out = pd.read_parquet(path = read_path, engine = "pyarrow")
+            print("Found Data\n")
+            
+        except:
+            
+            print("Collecting Data")
+            path = os.path.join(self.bbg_path, "FDTR.parquet")
+            df_out = (pd.read_parquet(
+                path = path, engine = "pyarrow").
+                assign(
+                    date = lambda x: pd.to_datetime(x.date).dt.date,
+                    security = lambda x: x.security.str.split(" ").str[0]).
+                drop(columns = ["variable"]))
+            
+            df_out.to_parquet(path = read_path, engine = "pyarrow")
+            
+        return df_out
         
         
                 
@@ -140,5 +164,7 @@ def main():
     data_prep.get_labor_sentiment()
     data_prep.get_fut_data()
     data_prep.get_bond_deliverables()
+    data_prep.get_fedfunds_data()
     
 if __name__ == "__main__": main()
+

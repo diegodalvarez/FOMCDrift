@@ -153,7 +153,65 @@ class DataPrep:
             df_out.to_parquet(path = read_path, engine = "pyarrow")
             
         return df_out
+    
+    def get_equity_data(self) -> pd.DataFrame:
         
+        read_path = os.path.join(self.data_path, "EquityData.parquet")
+        try:
+            
+            print("Searching for equity data")
+            df_out = pd.read_parquet(path = read_path, engine = "pyarrow")
+            print("Found equity data")
+            
+        except: 
+            
+            print("Collecting Equity Data")
+            spx_path = os.path.join(self.fut_path, "ES.parquet")            
+            df_spx = (pd.read_parquet(
+                path = spx_path, engine = "pyarrow").
+                assign(date = lambda x: pd.to_datetime(x.date).dt.date).
+                rename(columns = {"PX_LAST": "value"}))
+            
+            vix_path = os.path.join(self.bbg_path, "VIX.parquet")
+            df_vix = (pd.read_parquet(
+                path = vix_path, engine = "pyarrow").
+                drop(columns = ["variable"]).
+                assign(date = lambda x: pd.to_datetime(x.date).dt.date).
+                sort_values("date"))
+            
+            df_out = pd.concat([df_spx, df_vix])
+            df_out.to_parquet(path = read_path, engine = "pyarrow")
+            print("Saved Equity Data")
+            
+        return df_out
+    
+    def get_vix_futures(self, verbose: bool = False) -> pd.DataFrame: 
+        
+        read_path = os.path.join(self.data_path, "VIX.parquet")
+        try:
+            
+            if verbose == True: print("Searching for VIX data")
+            df_out = pd.read_parquet(path = read_path, engine = "pyarrow")  
+            if verbose == True: print("Found VIX Futures data")
+
+        except: 
+            
+            vix_path = os.path.join(self.fut_path, "UX.parquet")
+            df_out = (pd.read_parquet(
+                path = vix_path, engine = "pyarrow").
+                drop_duplicates().
+                sort_values("date").
+                assign(
+                    date        = lambda x: pd.to_datetime(x.date).dt.date,
+                    security    = lambda x: x.security.str.split(" ").str[0],
+                    LAG_PX_LAST = lambda x: x.PX_LAST.shift(),
+                    PX_RTN      = lambda x: x.PX_LAST.pct_change(),
+                    PX_DIFF     = lambda x: x.PX_LAST.diff()).
+                dropna())
+            
+            df_out.to_parquet(path = read_path, engine = "pyarrow")
+            
+        return df_out
         
                 
 def main():
@@ -165,6 +223,7 @@ def main():
     data_prep.get_fut_data()
     data_prep.get_bond_deliverables()
     data_prep.get_fedfunds_data()
+    data_prep.get_equity_data()
+    data_prep.get_vix_futures(verbose = True)
     
 #if __name__ == "__main__": main()
-

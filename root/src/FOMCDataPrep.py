@@ -6,6 +6,7 @@ Created on Fri Aug 23 07:02:30 2024
 """
 
 import os
+import numpy as np
 import pandas as pd
 import datetime as dt
 import pandas_datareader as web
@@ -14,9 +15,10 @@ class DataPrep:
     
     def __init__(self):
         
-        self.data_path = os.path.join(os.getcwd().split("\\root")[0], "data", "RawData")
-        self.bbg_path  = r"C:\Users\Diego\Desktop\app_prod\BBGData"
-        self.bbg_fut   = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager"
+        self.data_path   = os.path.join(os.getcwd().split("\\root")[0], "data", "RawData")
+        self.bbg_path    = r"C:\Users\Diego\Desktop\app_prod\BBGData"
+        self.bbg_fut     = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager"
+        self.survey_path = r"C:\Users\Diego\Desktop\app_prod\BBGData\SurveyData"
         
         if os.path.exists(self.data_path) == False: os.makedirs(self.data_path)
         
@@ -240,8 +242,52 @@ class DataPrep:
             
         return df_out
     
-    
-    
+    def get_fed_survery_estimate(self, verbose: bool = False) -> pd.DataFrame: 
+        
+        read_path = os.path.join(self.data_path, "FedEstimate.parquet")
+        try:
+            
+            if verbose == True: print("Looking for Fed Funds Esimate data")
+            df_tmp = pd.read_parquet(path = read_path, engine = "pyarrow")
+            if verbose == True: print("Found Data\n")
+            
+        except:
+        
+            if verbose == True: print("Generating Data")
+            file_path = os.path.join(self.survey_path, "fdtr.parquet")
+            
+            df_result_namer = (pd.DataFrame({
+                "result_tri"    : [-1, 0, 1],
+                "result_outcome": ["Undershoot", "Match", "Overshoot"]}))
+            
+            df_tmp = (pd.read_parquet(
+                path = file_path, engine = "pyarrow").
+                drop(columns = ["security"]).
+                pivot(index = "date", columns = "variable", values = "value").
+                rename(columns = {
+                    "BN_SURVEY_LOW"                : "bn_low",
+                    "BN_SURVEY_HIGH"               : "bn_high",
+                    "BN_SURVEY_MEDIAN"             : "bn_median",
+                    "BN_SURVEY_AVERAGE"            : "bn_average",
+                    "BN_SURVEY_NUMBER_OBSERVATIONS": "num_obs"}).
+                dropna().
+                reset_index().
+                melt(id_vars = ["date", "num_obs"]).
+                assign(date = lambda x: pd.to_datetime(x.date).dt.date).
+                merge(right = self.get_fed_funds(), how = "inner", on = ["date"]).
+                rename(columns = {
+                    "value": "predicted",
+                    "FDTR" : "actual"}).
+                assign(
+                    raw_result = lambda x: x.predicted - x.actual,
+                    result_tri = lambda x: np.sign(x.raw_result)).
+                merge(right = df_result_namer, how = "inner", on = ["result_tri"]).
+                drop(columns = ["result_tri"]))
+            
+            if verbose == True: print("Saving Data\n")
+            df_tmp.to_parquet(path = read_path, engine = "pyarrow")
+            
+        return df_tmp
     
 def main():
     
@@ -251,5 +297,6 @@ def main():
     data_prep.get_tsy_yields(verbose = True)
     data_prep.get_tsy_futures(verbose = True)
     data_prep.get_equity_futures(verbose = True)
+    data_prep.get_fed_survery_estimate(verbose = True)
 
 #if __name__ == "__main__": main()

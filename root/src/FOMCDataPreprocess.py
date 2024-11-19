@@ -56,7 +56,17 @@ class FOMCPreprocess(DataPrep):
                 groupby("security").
                 apply(self._get_roll_stats, self.window).
                 reset_index(drop = True).
-                dropna())
+                dropna().
+                assign(plot_name = lambda x: (x.Description.str.split(
+                    "cs").
+                    str[1].
+                    str.split("-").str[0].
+                    str.split("of").str[-1].
+                    str.split("Nat").str[0].
+                    str.replace("Reserve", "Reserve\n").
+                    str.replace("Year", "Year\n").
+                    str.replace("Exchange", "Exchange\n").
+                    str.replace("year", "year\n"))))
             
             df_out.to_parquet(path = file_path, engine = "pyarrow")
             

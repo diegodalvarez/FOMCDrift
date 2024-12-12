@@ -71,5 +71,41 @@ class FOMCPreprocess(DataPrep):
             df_out.to_parquet(path = file_path, engine = "pyarrow")
             
         return df_out
+    
+    def prep_mai_data(self, verbose: bool = False) -> None: 
+    
+        sheet_names = ["Daily Data", "Monthly Data"]
+        for sheet_name in sheet_names: 
+            
+            file_path = os.path.join(self.processed_data, sheet_name.split(" ")[0] + "MAI.parquet")
+            try:
+                
+                if verbose == True: print("Trying to prep MAI Data")
+                df_out = pd.read_parquet(path = file_path, engine = "pyarrow")
+                if verbose == True: print("Found data\n")
+                
+            except: 
+                
+                if verbose == True: print("Couldn't find data, collecting it now")
+                
+                mai_path  = os.path.join(self.data_path, "Fisher_Martineau_Sheng_MAI Data.xlsx")
+                df_out    = (pd.read_excel(
+                    io = mai_path, sheet_name = sheet_name).
+                    assign(date = lambda x: pd.to_datetime(x.date).dt.date).
+                    melt(id_vars = "date").
+                    dropna().
+                    assign(
+                        sentiment_source = lambda x: x.variable.str.split("_").str[-1],
+                        sentiment_type   = lambda x: x.variable.str.replace("_ni", "").str.replace("_wi", "")))
+                
+                if verbose == True: print("Saving data\n")
+                df_out.to_parquet(path = file_path, engine = "pyarrow")
+
+    
+    
+def main() -> None:
         
-df = FOMCPreprocess().prep_nlp()
+    FOMCPreprocess().prep_nlp(verbose = True)
+    FOMCPreprocess().prep_mai_data(verbose = True)
+    
+if __name__ == "__main__": main()

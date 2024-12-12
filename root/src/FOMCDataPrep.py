@@ -299,4 +299,4 @@ def main():
     data_prep.get_equity_futures(verbose = True)
     data_prep.get_fed_survery_estimate(verbose = True)
 
-#if __name__ == "__main__": main()
+if __name__ == "__main__": main()

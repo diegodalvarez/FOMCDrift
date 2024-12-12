@@ -11,3 +11,7 @@ The same method can be applied to specific days around FOMC announcements
 
 Looking at the explained variance of PCs around the sames FOMC announcement dates
 ![image](https://github.com/user-attachments/assets/028fb67f-1614-41fb-9d60-b6f9c85afacd)
+
+# Todo
+1. MAI Backtests
+2. Gradient Boosting Regression

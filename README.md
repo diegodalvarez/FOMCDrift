@@ -14,4 +14,5 @@ Looking at the explained variance of PCs around the sames FOMC announcement date
 
 # Todo
 1. MAI Backtests
-2. Gradient Boosting Regression
+2. Make a Master Backtest Comparison
+3. Gradient Boosting Regression

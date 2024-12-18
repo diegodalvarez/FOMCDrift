@@ -13,6 +13,8 @@ Looking at the explained variance of PCs around the sames FOMC announcement date
 ![image](https://github.com/user-attachments/assets/028fb67f-1614-41fb-9d60-b6f9c85afacd)
 
 # Todo
+1. MAI Monthly data analysis
 1. MAI Backtests
 2. Make a Master Backtest Comparison
-3. Gradient Boosting Regression
+3. OLS Regression models
+5. Gradient Boosting Regression

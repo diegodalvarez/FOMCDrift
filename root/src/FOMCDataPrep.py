@@ -6,6 +6,7 @@ Created on Fri Aug 23 07:02:30 2024
 """
 
 import os
+import requests
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -15,12 +16,28 @@ class DataPrep:
     
     def __init__(self):
         
-        self.data_path   = os.path.join(os.getcwd().split("\\root")[0], "data", "RawData")
-        self.bbg_path    = r"C:\Users\Diego\Desktop\app_prod\BBGData"
-        self.bbg_fut     = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager"
-        self.survey_path = r"C:\Users\Diego\Desktop\app_prod\BBGData\SurveyData"
+        
+        self.script_dir = (os.path.abspath(__file__))
+        self.src_path   = os.path.abspath(os.path.join(self.script_dir, os.pardir))
+        self.root_path  = os.path.abspath(os.path.join(self.src_path, os.pardir))
+        self.repo_path  = os.path.abspath(os.path.join(self.root_path, os.pardir))
+        self.data_path  = os.path.join(self.repo_path, "data")
+        self.raw_path   = os.path.join(self.data_path, "RawData")
         
         if os.path.exists(self.data_path) == False: os.makedirs(self.data_path)
+        if os.path.exists(self.raw_path) == False: os.makedirs(self.raw_path)
+        
+        self.bbg_path = r"C:\Users\Diego\Desktop\app_prod\BBGData"
+        if os.path.exists(self.bbg_path) == False: 
+            self.bbg_path = r"/Users/diegoalvarez/Desktop/BBGData"
+            
+        self.bbg_fut = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager"
+        if os.path.exists(self.bbg_fut) == False: 
+            self.bbg_fut = r"/Users/diegoalvarez/Desktop/BBGFuturesManager"
+            
+        self.survey_path = r"C:\Users\Diego\Desktop\app_prod\BBGData\SurveyData"
+        if os.path.exists(self.survey_path) == False:
+            self.survey_path = r"/Users/diegoalvarez/Desktop/BBGData/SurveyData"
         
     def _get_fut_rtn(self, df: pd.DataFrame) -> pd.DataFrame: 
         
@@ -40,7 +57,7 @@ class DataPrep:
         
     def get_tsy_yields(self, verbose: bool = False) -> pd.DataFrame:
         
-        path = os.path.join(self.data_path, "TSYFredYields.parquet")
+        path = os.path.join(self.raw_path, "TSYFredYields.parquet")
         try:
             
             if verbose == True: print("Searching for Treasury data")
@@ -76,7 +93,7 @@ class DataPrep:
     
     def get_sentiment(self, verbose: bool = False) -> pd.DataFrame:
         
-        read_path = os.path.join(self.data_path, "SentimentData.parquet")
+        read_path = os.path.join(self.raw_path, "SentimentData.parquet")
         try:
             
             if verbose == True: print("Trying to find Sentiment data")
@@ -138,7 +155,7 @@ class DataPrep:
     
     def get_tsy_futures(self, verbose = False) -> pd.DataFrame: 
         
-        read_path = os.path.join(self.data_path, "TreasuryFutures.parquet")
+        read_path = os.path.join(self.raw_path, "TreasuryFutures.parquet")
         try:
             
             if verbose == True: print("Looking for Treasury data")
@@ -184,7 +201,7 @@ class DataPrep:
     
     def get_equity_futures(self, verbose: bool = False) -> pd.DataFrame: 
         
-        read_path = os.path.join(self.data_path, "EquityFutures.parquet")
+        read_path = os.path.join(self.raw_path, "EquityFutures.parquet")
         try:
             
             if verbose == True: print("Looking for Equity Futures data")
@@ -215,7 +232,7 @@ class DataPrep:
     
     def get_fed_funds(self, verbose: bool = False) -> pd.DataFrame: 
         
-        read_path = os.path.join(self.data_path, "FFRate.parquet")
+        read_path = os.path.join(self.raw_path, "FFRate.parquet")
         try:
             
             if verbose == True: print("Looking for Fed Funds Data data")
@@ -244,7 +261,7 @@ class DataPrep:
     
     def get_fed_survery_estimate(self, verbose: bool = False) -> pd.DataFrame: 
         
-        read_path = os.path.join(self.data_path, "FedEstimate.parquet")
+        read_path = os.path.join(self.raw_path, "FedEstimate.parquet")
         try:
             
             if verbose == True: print("Looking for Fed Funds Esimate data")
@@ -289,6 +306,41 @@ class DataPrep:
             
         return df_tmp
     
+    def get_mai_data(self, verbose: bool = False) -> pd.DataFrame: 
+        
+        file_path = os.path.join(self.raw_path, "MAIData.parquet")
+        try:
+            
+            if verbose == True: print("Trying to find data")
+            df_out = pd.read_parquet(path = file_path, engine = "pyarrow")
+            if verbose == True: print("Found data\n")
+            
+        except: 
+            
+            if verbose == True: print("Couldn't find data, collecting it now")
+            
+            url = r"https://www.dropbox.com/scl/fi/31egxyr781taa4q88x6v1"\
+                "/Fisher_Martineau_Sheng_MAI-Data.xlsx"\
+                    "?rlkey=svwon9ambcjtpw44y5zoum1rl&dl=1"
+                
+            sheet_names = ["Daily Data", "Monthly Data"]
+            df_out      = pd.DataFrame()
+            
+            for sheet_name in sheet_names: 
+                
+                df_tmp = (pd.read_excel(
+                    io = url, sheet_name = sheet_name).
+                    melt(id_vars = "date").
+                    dropna().
+                    assign(group = sheet_name.lower().replace(" ", "_")))
+                
+                df_out = pd.concat([df_out, df_tmp])
+                
+            if verbose == True: print("Collecting data\n")
+            df_out.to_parquet(path = file_path, engine = "pyarrow")
+            
+        return df_out
+    
 def main():
     
     data_prep = DataPrep()
@@ -298,5 +350,6 @@ def main():
     data_prep.get_tsy_futures(verbose = True)
     data_prep.get_equity_futures(verbose = True)
     data_prep.get_fed_survery_estimate(verbose = True)
+    data_prep.get_mai_data(verbose = True)
 
 if __name__ == "__main__": main()

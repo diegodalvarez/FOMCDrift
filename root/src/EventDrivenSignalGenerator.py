@@ -16,6 +16,8 @@ class EventDrivenSignalGenerator(DataPrep):
         
         super().__init__()
         self.fdtr_event = r"C:\Users\Diego\Desktop\app_prod\BBGEvent\data\event"
+        if os.path.exists(self.fdtr_event) == False: 
+            self.fdtr_event = r"/Users/diegoalvarez/Desktop/BBGEvent/data/event"
         
     def _fill_days(self, df: pd.DataFrame, before: int, after: int, verbose: bool = False) -> pd.DataFrame:
         

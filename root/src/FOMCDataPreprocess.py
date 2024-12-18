@@ -14,10 +14,9 @@ class FOMCPreprocess(DataPrep):
     def __init__(self) -> None: 
         
         super().__init__()
-        self.processed_data = (
-            os.path.join(os.getcwd().split("\\root")[0], "data", "ProcessedData"))
-        
+        self.processed_data = os.path.join(self.data_path, "ProcessedData")
         if os.path.exists(self.processed_data) == False: os.makedirs(self.processed_data)
+
         self.nlp_tickers = ["BENLPFED", "APUSISGF", "APUSSPGF", "APUSTYGF", "APUSXRGF"]
         self.window      = 10
         
@@ -49,7 +48,7 @@ class FOMCPreprocess(DataPrep):
         
             if verbose == True: print("Couldn't find data, collecting it")
             
-            read_path = os.path.join(self.data_path, "SentimentData.parquet")
+            read_path = os.path.join(self.raw_path, "SentimentData.parquet")
             df_out    = (pd.read_parquet(
                 path = read_path, engine = "pyarrow").
                 query("security == @self.nlp_tickers").
@@ -74,34 +73,28 @@ class FOMCPreprocess(DataPrep):
     
     def prep_mai_data(self, verbose: bool = False) -> None: 
     
-        sheet_names = ["Daily Data", "Monthly Data"]
-        for sheet_name in sheet_names: 
+        file_path = os.path.join(self.processed_data, "MAI.parquet")
+        try:
             
-            file_path = os.path.join(self.processed_data, sheet_name.split(" ")[0] + "MAI.parquet")
-            try:
-                
-                if verbose == True: print("Trying to prep MAI Data")
-                df_out = pd.read_parquet(path = file_path, engine = "pyarrow")
-                if verbose == True: print("Found data\n")
-                
-            except: 
-                
-                if verbose == True: print("Couldn't find data, collecting it now")
-                
-                mai_path  = os.path.join(self.data_path, "Fisher_Martineau_Sheng_MAI Data.xlsx")
-                df_out    = (pd.read_excel(
-                    io = mai_path, sheet_name = sheet_name).
-                    assign(date = lambda x: pd.to_datetime(x.date).dt.date).
-                    melt(id_vars = "date").
-                    dropna().
-                    assign(
-                        sentiment_source = lambda x: x.variable.str.split("_").str[-1],
-                        sentiment_type   = lambda x: x.variable.str.replace("_ni", "").str.replace("_wi", "")))
-                
-                if verbose == True: print("Saving data\n")
-                df_out.to_parquet(path = file_path, engine = "pyarrow")
-
-    
+            if verbose == True: print("Trying to find Prepped Data")
+            df_out = pd.read_parquet(path = file_path, engine = "pyarrow")
+            if verbose == True: print("Found data\n")
+            
+        except: 
+        
+            if verbose == True: print("Couldn't find data, collecting it now")
+            read_path = os.path.join(self.raw_path, "MAIData.parquet")
+            df_out    = (pd.read_parquet(
+                path = read_path, engine = "pyarrow").
+                assign(
+                    date = lambda x: pd.to_datetime(x.date).dt.date,
+                    sentiment_source = lambda x: x.variable.str.split("_").str[-1],
+                    sentiment_type   = lambda x: x.variable.str.replace("_ni", "").str.replace("_wi", "")))
+            
+            if verbose == True: print("saving data")
+            df_out.to_parquet(path = file_path, engine = "pyarrow")
+            
+        return df_out
     
 def main() -> None:
         

@@ -71,7 +71,7 @@ class FOMCPreprocess(DataPrep):
             
         return df_out
     
-    def prep_mai_data(self, verbose: bool = False) -> None: 
+    def prep_mai(self, verbose: bool = False) -> None: 
     
         file_path = os.path.join(self.processed_data, "MAI.parquet")
         try:
@@ -89,7 +89,12 @@ class FOMCPreprocess(DataPrep):
                 assign(
                     date = lambda x: pd.to_datetime(x.date).dt.date,
                     sentiment_source = lambda x: x.variable.str.split("_").str[-1],
-                    sentiment_type   = lambda x: x.variable.str.replace("_ni", "").str.replace("_wi", "")))
+                    sentiment_type   = lambda x: x.variable.str.replace("_ni", "").str.replace("_wi", ""),
+                    group_var        = lambda x: x.variable + "_" + x.group).
+                groupby("group_var").
+                apply(self._get_roll_stats, self.window).
+                reset_index(drop = True).
+                dropna())
             
             if verbose == True: print("saving data")
             df_out.to_parquet(path = file_path, engine = "pyarrow")
@@ -99,6 +104,6 @@ class FOMCPreprocess(DataPrep):
 def main() -> None:
         
     FOMCPreprocess().prep_nlp(verbose = True)
-    FOMCPreprocess().prep_mai_data(verbose = True)
+    FOMCPreprocess().prep_mai(verbose = True)
     
 if __name__ == "__main__": main()

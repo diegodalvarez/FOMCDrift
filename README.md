@@ -23,8 +23,8 @@ Now all of the backtests can be put together and fit via OLS. In this case regre
 <img width="1187" alt="image" src="https://github.com/user-attachments/assets/00a68869-93ee-4636-890a-67ee3535df5a" />
 
 # Todo
-1. MAI Monthly data analysis
-1. MAI Backtests
-2. Make a Master Backtest Comparison
-3. OLS Regression models
-5. Gradient Boosting Regression
+1. Naive Model Comparison
+2. Formalize OLS Regression
+3. Boostrapped OLS
+4. Rolling OLS
+5. Expanding OLS

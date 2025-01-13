@@ -86,8 +86,5 @@ class Regression(FOMCPreprocess, EventDrivenSignalGenerator):
         
         return df_out
         
-     
-#df = Regression()._mai_sentiment()
-#df = Regression()._bbg_sentiment()
-#df = Regression()._get_forecast()
+
 df = Regression().prep_regression()

@@ -27,17 +27,21 @@ class DataPrep:
         if os.path.exists(self.data_path) == False: os.makedirs(self.data_path)
         if os.path.exists(self.raw_path) == False: os.makedirs(self.raw_path)
         
-        self.bbg_path = r"C:\Users\Diego\Desktop\app_prod\BBGData"
-        if os.path.exists(self.bbg_path) == False: 
-            self.bbg_path = r"/Users/diegoalvarez/Desktop/BBGData"
+        #self.bbg_path = r"C:\Users\Diego\Desktop\app_prod\BBGData"
+        #if os.path.exists(self.bbg_path) == False: 
+        #    self.bbg_path = r"/Users/diegoalvarez/Desktop/BBGData"
+        
+        #self.bbg_fut = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager"
+        #if os.path.exists(self.bbg_fut) == False: 
+        #    self.bbg_fut = r"/Users/diegoalvarez/Desktop/BBGFuturesManager"
+        
+        #self.survey_path = r"C:\Users\Diego\Desktop\app_prod\BBGData\SurveyData"
+        #if os.path.exists(self.survey_path) == False:
+        #    self.survey_path = r"/Users/diegoalvarez/Desktop/BBGData/SurveyData"
             
-        self.bbg_fut = r"C:\Users\Diego\Desktop\app_prod\BBGFuturesManager"
-        if os.path.exists(self.bbg_fut) == False: 
-            self.bbg_fut = r"/Users/diegoalvarez/Desktop/BBGFuturesManager"
-            
-        self.survey_path = r"C:\Users\Diego\Desktop\app_prod\BBGData\SurveyData"
-        if os.path.exists(self.survey_path) == False:
-            self.survey_path = r"/Users/diegoalvarez/Desktop/BBGData/SurveyData"
+        self.bbg_path    = r"A:\BBGData"
+        self.bbg_fut     = r"A:\BBGFuturesManager_backup_backup"
+        self.survey_path = r"A:\BBGData\SurveyData"
         
     def _get_fut_rtn(self, df: pd.DataFrame) -> pd.DataFrame: 
         
@@ -268,7 +272,7 @@ class DataPrep:
             df_tmp = pd.read_parquet(path = read_path, engine = "pyarrow")
             if verbose == True: print("Found Data\n")
             
-        except:
+        except:  
         
             if verbose == True: print("Generating Data")
             file_path = os.path.join(self.survey_path, "fdtr.parquet")

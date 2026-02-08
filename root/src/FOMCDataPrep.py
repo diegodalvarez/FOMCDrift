@@ -237,6 +237,7 @@ class DataPrep:
     def get_fed_funds(self, verbose: bool = False) -> pd.DataFrame: 
         
         read_path = os.path.join(self.raw_path, "FFRate.parquet")
+        
         try:
             
             if verbose == True: print("Looking for Fed Funds Data data")

@@ -38,6 +38,7 @@ class FOMCPreprocess(DataPrep):
     def prep_nlp(self, verbose: bool = False) -> pd.DataFrame: 
         
         file_path = os.path.join(self.processed_data, "ProcessedSentimentData.parquet")
+        
         try:
             
             if verbose == True: print("Trying to find prepped data")
@@ -104,6 +105,6 @@ class FOMCPreprocess(DataPrep):
 def main() -> None:
         
     FOMCPreprocess().prep_nlp(verbose = True)
-    FOMCPreprocess().prep_mai(verbose = True)
+    #FOMCPreprocess().prep_mai(verbose = True)
     
 if __name__ == "__main__": main()

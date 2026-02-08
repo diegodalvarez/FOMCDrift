@@ -44,12 +44,22 @@ class EventDrivenSignalGenerator(DataPrep):
             assign(date = lambda x: pd.to_datetime(x.date).dt.date).
             sort_values("date"))
         
+        # need to change this
+        path          = r"A:\2025Backup\app_prod\BBGEvent\data\event\FDTR.parquet"
         df_fdtr_dates = (pd.read_parquet(
-            path   = os.path.join(self.fdtr_event, "FDTR.parquet"),
+            path = path, engine = "pyarrow").
+            assign(date = lambda x: pd.to_datetime(x.date).dt.date).
+            drop(columns = ["security", "ECO_RELEASE_DT"]).
+            assign(indicator = True))
+        
+        '''
+        df_fdtr_dates = (pd.read_parquet(
+            path   = os.path.join(self.bbg_path, "data", "FDTR.parquet"),
             engine = "pyarrow").
             assign(date = lambda x: pd.to_datetime(x.date).dt.date).
             drop(columns = ["security", "ECO_RELEASE_DT"]).
             assign(indicator = True))
+        '''
         
         min_date = max([df_spx.date.min(), df_fdtr_dates.date.min()])
         

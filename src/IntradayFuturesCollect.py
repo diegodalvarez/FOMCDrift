@@ -246,6 +246,6 @@ def main() -> None:
                 
     first_rate = FirstRateFutures()
     #first_rate.get_intraday_futures()
-    first_rate.get_trading_zones()
+    #first_rate.get_trading_zones()
     
 if __name__ == "__main__": main()

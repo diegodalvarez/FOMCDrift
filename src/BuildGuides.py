@@ -9,6 +9,7 @@ import os
 import zipfile
 import requests
 import pandas as pd
+import datetime as dt
 
 from tqdm import tqdm
 from io import StringIO
@@ -205,11 +206,68 @@ class FirstRateGuides:
         if verbose: print("Saving data\n")
         df_all_times.to_excel(out_path)
         
+    def get_time_to_meeting(self, verbose: bool = True) -> None: 
+        
+        if verbose: print("Getting Time to Meeting")
+        
+        out_path = os.path.join(self.guide_path, "MeetingTimes.parquet")
+        
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+        
+        path    = os.path.join(self.guide_path, "FedMeetings.xlsx")
+        df_fomc = (pd
+                .read_excel(io = path)
+                [["date"]]
+                .drop_duplicates()
+                .sort_values("date")
+                .reset_index()
+                .rename(columns = {"index": "meeting_id"})
+                .assign(
+                    meeting_id = lambda x: x.meeting_id + 1,
+                    date       = lambda x: pd.to_datetime(
+                        x.date.astype(str) + " " + str(dt.time(hour = 12 + 2, minute = 0))),
+                    start_date = lambda x: x.date - pd.Timedelta(days = 3),
+                    end_date   = lambda x: x.date + pd.Timedelta(days = 2))
+                .rename(columns = {"date": "fomc_date"}))
+        
+        df_list = []
+        
+        for i, row in df_fomc.iterrows():
+            
+            row_dict   = row.to_dict()
+            start_time = row_dict["start_date"]
+            end_time   = row_dict["end_date"]
+            
+            min_range = (pd
+                         .date_range(
+                             start = start_time, 
+                             end   = end_time,
+                             freq  = "min"))
+            
+            df_tmp = pd.DataFrame({"datetime": min_range})
+            for key, value in row_dict.items():
+                df_tmp[key] = value
+                
+            df_list.append(df_tmp)
+            
+        df_combined = (pd
+                .concat(df_list)
+                .assign(
+                    datetime_to_meeting = lambda x: x.fomc_date - x.datetime,
+                    day_to_meeting      = lambda x: x.datetime_to_meeting.dt.days)
+                .loc[lambda x: x.day_to_meeting != x.day_to_meeting.max()])
+        
+        if verbose: print("Saving data\n")
+        df_combined.to_parquet(path = out_path, engine = "pyarrow")
+        
 def main() -> None: 
             
     first_rate = FirstRateGuides()
     #first_rate.get_all_volumes()
     #first_rate.get_volume_dates()
     #first_rate.get_zone_times()
+    #first_rate.get_time_to_meeting()
     
 if __name__ == "__main__": main()

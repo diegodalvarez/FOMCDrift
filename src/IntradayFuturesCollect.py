@@ -241,7 +241,6 @@ class FirstRateFutures:
                 if verbose: print("Saving data\n")    
                 df_zone_filled.to_parquet(path = out_path, engine = "pyarrow")
 
-
 def main() -> None: 
                 
     first_rate = FirstRateFutures()

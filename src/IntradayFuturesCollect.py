@@ -8,6 +8,7 @@ Created on Sun Sep 13 00:34:25 2026
 import os
 import zipfile
 import pandas as pd
+from   tqdm import tqdm
 
 class FirstRateFutures:
     
@@ -35,7 +36,7 @@ class FirstRateFutures:
         df_list = []
         
         with zipfile.ZipFile(folder) as z:
-            for file in files: 
+            for file in tqdm(files): 
                 with z.open(file) as f: 
                     
                     df_add = (pd

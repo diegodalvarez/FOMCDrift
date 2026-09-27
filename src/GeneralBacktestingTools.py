@@ -6,20 +6,53 @@ Created on Thu Sep 24 08:55:05 2026
 """
 
 import os
+import zipfile
 import numpy as np
 import pandas as pd
-import datetime as dt
+
 
 class GeneralTools:
     
     def __init__(self) -> None: 
         
-        self.src_path = os.getcwd()
-        self.repo_path = os.path.abspath(os.path.join(self.src_path, ".."))
-        self.data_path = os.path.join(self.repo_path, "data")
+        self.src_path   = os.getcwd()
+        self.repo_path  = os.path.abspath(os.path.join(self.src_path, ".."))
+        self.data_path  = os.path.join(self.repo_path, "data")
+        self.guide_path = os.path.join(self.data_path, "Guides")
+
         
-        self.gen_path = os.path.join(self.data_path, "GeneralBacktest")
-        if not os.path.exists(self.gen_path): os.makedirs(self.gen_path)
+        self.gen_path        = os.path.join(self.data_path, "GeneralBacktest")
+        self.adj_frate_path  = os.path.join(self.data_path, "AdjustedData")
+        self.first_rate_path = r"G:\FirstRateData"
+        
+        if not os.path.exists(self.gen_path): 
+            os.makedirs(self.gen_path)
+        
+        if not os.path.exists(self.adj_frate_path):
+            os.makedirs(self.adj_frate_path)
+            
+        self.columns = ["date", "open", "high", "low", "close", "volume"]
+            
+    def _read_open_txt_files(self, files: list, folder: str, columns: list) -> pd.DataFrame:
+        
+        df_list = []
+        
+        with zipfile.ZipFile(folder) as z:
+            for file in files: 
+                with z.open(file) as f: 
+                    
+                    df_add = (pd
+                          .read_csv(
+                              filepath_or_buffer = f,
+                              header             = None,
+                              names              = columns)
+                          [["open", "date"]]
+                          .assign(file = file))
+                    
+                    df_list.append(df_add)
+                    
+        df_out = pd.concat(df_list)
+        return df_out
         
     def get_full_period_open_pnl(self, verbose: bool = True) -> None: 
         
@@ -67,5 +100,50 @@ class GeneralTools:
         if verbose: 
             print("Saving data\n")
             df_out.to_parquet(path = out_path, engine = "pyarrow")
+            
+    def get_minutely_adj_data(self, verbose: bool = True) -> None: 
         
-GeneralTools().get_full_period_open_pnl()
+        if verbose: print("Getting Minutely Roll Adjusted Sharpe")
+        
+        out_path = os.path.join(self.adj_frate_path, "TotalPeriodSharpe.parquet")
+        if os.path.exists(out_path):
+            if verbose: print("Already have the data\n")
+            return None
+        
+        px_path = os.path.join(
+            self.first_rate_path, 
+            "FutData", 
+            "fut_1min_contin_adj_ratio.zip")
+        
+        tsy_path    = os.path.join(self.guide_path, "TreasuryFuturesTickers.xlsx")
+        all_tickers = (pd
+                .read_excel(io = tsy_path)
+                .Ticker
+                .drop_duplicates()
+                .sort_values()
+                .to_list())
+        
+        tickers = [ticker for ticker in all_tickers if ticker != "ZQ"]
+        paths   = ["{}_full_1min_continuous_ratio_adjusted.txt".format(ticker) for ticker in tickers]
+        
+        df_tmp = (self
+                  ._read_open_txt_files(paths, px_path, self.columns)
+                  .set_index("date")
+                  .groupby("file")
+                  .apply(lambda x: x.sort_index().open.diff())
+                  .reset_index()
+                  .drop(columns = ["date"])
+                  .groupby("file")
+                  .agg(["mean", "std"])
+                  ["open"])
+        
+        if verbose: print("Saving data\n")
+        df_tmp.to_parquet(path = out_path, engine = "pyarrow")
+        
+def main() -> None: 
+        
+    general_tools = GeneralTools()
+    #general_tools.get_full_period_open_pnl()
+    general_tools.get_minutely_adj_data()
+    
+if __name__ == "__main__": main()

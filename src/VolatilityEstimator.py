@@ -6,10 +6,12 @@ Created on Tue Sep 29 08:01:37 2026
 """
 
 import os
+import pickle
 import zipfile
 import numpy as np
 import pandas as pd
 import datetime as dt
+import statsmodels.api as sm
 
 from tqdm import tqdm
 
@@ -331,7 +333,8 @@ class VolEstimators:
         df_out = (df_prior_zone
                 .merge(right = df_zone      , how = "inner", on = ["ticker", "zone", "name", "fomc_date"])
                 .merge(right = df_fomc_guide, how = "inner", on = ["fomc_date"])
-                .merge(right = df_prior     , how = "inner", on = ["ticker", "meeting_id", "zone", "contract"]))
+                .merge(right = df_prior     , how = "inner", on = ["ticker", "meeting_id", "zone", "contract"])
+                .rename(columns = {"std": "cur_vol"}))
         
         df_check = (df_out
                 [["ticker", "zone", "meeting_id"]]
@@ -347,26 +350,79 @@ class VolEstimators:
                 .reset_index()
                 .rename(columns = {"count": "from_orig"}))
         
-        df_out = (df_check
+        df_check_out = (df_check
                 .merge(right = df_orig, how = "outer", on = ["ticker", "zone"])
                 .assign(diff_val = lambda x: x.from_orig - x.from_out)
                 .loc[lambda x: np.abs(x.diff_val) > tol])
         
-        if len(df_out) > 0:
+        if len(df_check_out) > 0:
             if verbose:
                 print("There is some data being destroyed at these places")
-                print(df_out)
+                print(df_check_out)
         
         if verbose: 
             print("Saving data\n")
             
         df_out.to_parquet(path = out_path, engine = "pyarrow")
+        
+    def full_sample_ols_models(self, verbose: bool = True) -> None: 
+        
+        if verbose: 
+            print("Getting Full Sample OLS Models")
+        
+        out_path = os.path.join(self.vol_path, "CombinedVolEstimators.pkl")
+        
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+        
+        path   = os.path.join(self.vol_path, "CombinedVolEstimators.parquet")
+        df_raw = (pd
+                .read_parquet(path = path, engine = "pyarrow")
+                [["ticker", "name", "zone", "lday_vol", "lzone_vol", "cur_vol"]]
+                .assign(group_var = lambda x: x.ticker + " " + x.name + " " + x.zone))
+        
+        models     = {}
+        group_vars = df_raw.group_var.drop_duplicates().sort_values().to_list()
+        
+        for group_var in group_vars: 
+            
+            df_tmp = (df_raw
+                    .loc[lambda x: x.group_var == group_var]
+                    .drop(columns = ["group_var"])
+                    .dropna())
+            
+            lday_model = (sm
+                    .OLS(
+                        endog = df_tmp.cur_vol,
+                        exog  = sm.add_constant(df_tmp.lday_vol))
+                    .fit())
+            
+            lzone_model = (sm
+                           .OLS(
+                               endog = df_tmp.cur_vol,
+                               exog  = sm.add_constant(df_tmp.lzone_vol))
+                           .fit())
+            
+            combined_model = (sm
+                              .OLS(
+                                  endog = df_tmp.cur_vol,
+                                  exog  = sm.add_constant(df_tmp[["lzone_vol", "lday_vol"]]))
+                              .fit())
+            
+            models[group_var + " lday"]     = lday_model
+            models[group_var + " lzone"]    = lzone_model
+            models[group_var + " combined"] = combined_model
+    
+        if verbose: print("Saving data\n")
+        with open(out_path, "wb") as f: pickle.dump(models, f)
 
 def main() -> None: 
         
     vol_estimators = VolEstimators()
     #vol_estimators.get_prior_day_vol()
     #vol_estimators.get_zone_vol()
-    vol_estimators.combine_vols()
+    #vol_estimators.combine_vols()
+    #vol_estimators.full_sample_ols_models()
     
 if __name__ == "__main__": main()

@@ -379,18 +379,22 @@ class VolEstimators:
         path   = os.path.join(self.vol_path, "CombinedVolEstimators.parquet")
         df_raw = (pd
                 .read_parquet(path = path, engine = "pyarrow")
-                [["ticker", "name", "zone", "lday_vol", "lzone_vol", "cur_vol"]]
+                [["ticker", "name", "zone", "lday_vol", "lzone_vol", "cur_vol", "meeting_id"]]
                 .assign(group_var = lambda x: x.ticker + " " + x.name + " " + x.zone))
         
         models     = {}
         group_vars = df_raw.group_var.drop_duplicates().sort_values().to_list()
         
-        for group_var in group_vars: 
+        if verbose: iter_ = tqdm(group_vars)
+        else      : iter_ = group_vars
+        
+        for group_var in iter_: 
             
             df_tmp = (df_raw
                     .loc[lambda x: x.group_var == group_var]
                     .drop(columns = ["group_var"])
-                    .dropna())
+                    .dropna()
+                    .set_index("meeting_id"))
             
             lday_model = (sm
                     .OLS(
@@ -416,6 +420,49 @@ class VolEstimators:
     
         if verbose: print("Saving data\n")
         with open(out_path, "wb") as f: pickle.dump(models, f)
+        
+    def get_full_sample_ols_params(self, verbose: bool = True) -> None: 
+        
+        if verbose: print("Getting Full Sample OLS Params")
+        
+        out_path = os.path.join(self.vol_path, "CombinedVolOLSParams.parquet")
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+        
+        model_path = os.path.join(self.vol_path, "CombinedVolEstimators.pkl")
+        with open(model_path, "rb") as f: models = pickle.load(f)
+        
+        df_lists = []
+
+        for model_name in models.keys():
+            
+            tmp_model                    = models[model_name]
+            ticker, name, zone, vol_type = model_name.split(" ")
+            
+            df_param  = tmp_model.params.to_frame(name = "param").reset_index()
+            df_pvalue = tmp_model.pvalues.to_frame(name = "pvalue").reset_index()
+            df_tvalue = tmp_model.tvalues.to_frame(name = "tvalue").reset_index()
+            
+            df_add = (df_param
+                    .merge(right = df_pvalue, how = "inner", on = ["index"])
+                    .merge(right = df_tvalue, how = "inner", on = ["index"])
+                    .assign(
+                        name   = model_name,
+                        r2     = tmp_model.rsquared,
+                        adj_r2 = tmp_model.rsquared_adj)
+                    .assign(
+                        ticker   = ticker,
+                        name     = name,
+                        zone     = zone,
+                        vol_type = vol_type))
+            
+            df_lists.append(df_add)
+            
+        df_out = pd.concat(df_lists)
+
+        if verbose: print("Saving data\n")
+        df_out.to_parquet(path = out_path, engine = "pyarrow")
 
 def main() -> None: 
         
@@ -424,5 +471,6 @@ def main() -> None:
     #vol_estimators.get_zone_vol()
     #vol_estimators.combine_vols()
     #vol_estimators.full_sample_ols_models()
+    #vol_estimators.get_full_sample_ols_params()
     
 if __name__ == "__main__": main()

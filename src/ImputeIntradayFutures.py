@@ -20,11 +20,15 @@ class Impute:
         self.raw_path    = os.path.join(self.data_path, "RawFirstRateData")
         self.zone_path   = os.path.join(self.data_path, "ZoneFirstRateData")
         self.impute_path = os.path.join(self.data_path, "ZoneImputedFirstRateData")
+        self.qual_path   = os.path.join(self.data_path, "DataQuality")
         
         self.first_rate_path = r"G:\FirstRateData"
         
         if not os.path.exists(self.impute_path):
             os.makedirs(self.impute_path)
+            
+        if not os.path.exists(self.qual_path):
+            os.makedirs(self.qual_path)
             
         self.columns = ["date", "open", "high", "low", "close", "volume"]
     
@@ -69,7 +73,10 @@ class Impute:
      
     def impute_open_close(self, verbose: bool = True) -> None: 
         
-        files = os.listdir(self.zone_path)
+        files           = os.listdir(self.zone_path)
+        qual_out_path   = os.path.join(self.qual_path, "ImputeDataQuality.parquet")
+        df_quality_list = []
+        
         for file in files: 
             
             if verbose: print("Working on {}".format(file.split(".")[0].replace("_", " ")))
@@ -89,6 +96,18 @@ class Impute:
                       .reset_index()
                       .drop(columns = ["level_1"])
                       .assign(variable = lambda x: np.where(x.impute_open != x.impute_open, "missing", x.variable)))
+            
+            df_quality_add = (df_out
+                    [["meeting_id"]]
+                    .drop_duplicates()
+                    .agg(["min", "max", "count"])
+                    .T
+                    .add_suffix("_count")
+                    .assign(
+                        exp_count = lambda x: x.max_count - x.min_count,
+                        file      = file))
+            
+            df_quality_list.append(df_quality_add)
             
             total_meetings = len(df_out.meeting_id.drop_duplicates())
             
@@ -115,6 +134,11 @@ class Impute:
             
             if verbose: print("Saving data\n")
             df_out.to_parquet(path = out_path, engine = "pyarrow")
+            
+        df_quality = (pd.concat(df_quality_list))
+        if verbose: print("Saving data Quality\n")
+        df_quality.to_parquet(path = qual_out_path, engine = "pyarrow")
+
                 
 if __name__ == "__main__": 
     Impute().impute_open_close()

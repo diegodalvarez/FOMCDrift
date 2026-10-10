@@ -22,6 +22,8 @@ class InSampleBacktest:
         if not os.path.exists(self.is_back_path):
             os.makedirs(self.is_back_path)
             
+        self.bad_futures = ["ZQ"]
+            
     def vol_adj_backtest(self, verbose: bool = True) -> None: 
         
         path    = os.path.join(self.data_path, "", r"ZoneImputedFirstRateData")
@@ -78,6 +80,7 @@ class InSampleBacktest:
                 ann_vol = lambda x: x.vol_est * np.sqrt(390),
                 weight  = lambda x: 0.01 / x.ann_vol))
         
+        '''
         display(df_vol_weighting
                 .loc[lambda x: x.ticker == "TN"]
                 .loc[lambda x: x.vol_type == x.vol_type.min()]
@@ -85,12 +88,58 @@ class InSampleBacktest:
                 .drop(columns = ["vol_type", "zone"])
                 .sort_values("meeting_id")
                 .loc[lambda x: x.meeting_id > 185])
+        
         return-1
+        '''
     
         df_vol_target = (df_pnl
             .assign(meeting_id = lambda x: x.meeting_id.astype(int))
             .merge(right = df_vol_weighting, how = "inner", on = ["ticker", "meeting_id", "zone", "name"])
             .assign(vol_rtn = lambda x: x.weight * x.impute_open))
+        
+        # since there are holes in the original data when we check for holes
+        # we have to account for that
+        
+        df_vol_event_check = (df_vol_target
+                [["ticker", "meeting_id", "zone"]]
+                .drop_duplicates()
+                .groupby(["ticker", "zone"])
+                .agg(["min", "max", "count"])
+                ["meeting_id"]
+                .add_suffix("_val")
+                .apply(lambda x: x.astype(int))
+                .assign(exp_count = lambda x: x.max_val - x.min_val)
+                [["count_val", "exp_count"]]
+                .rename(columns = {
+                    "count_val": "from_target_count",
+                    "exp_count": "from_target_exp"})
+                .reset_index())
+        
+        path          = os.path.join(self.data_path, "DataQuality", "ImputeDataQuality.parquet")
+        df_qual_check = (pd
+                .read_parquet(path = path, engine = "pyarrow")
+                .reset_index(drop = True)
+                [["count_count", "exp_count", "file"]]
+                .assign(
+                    count_count = lambda x: x.count_count.astype(int),
+                    exp_count   = lambda x: x.exp_count.astype(int))
+                .rename(columns = {
+                    "count_count": "from_qual_count",
+                    "exp_count"  : "from_qual_exp"})
+                .assign(
+                    ticker = lambda x: x.file.str.split("_").str[0],
+                    zone   = lambda x: x.file.str.split("_").str[1].str.split(".").str[0])
+                .drop(columns = ["file"])
+                .loc[lambda x: ~x.ticker.isin(self.bad_futures)])
+        
+        df_qual_check = (df_vol_event_check
+                .merge(right = df_qual_check, how = "outer", on = ["ticker", "zone"])
+                .loc[lambda x: x.from_qual_count != x.from_target_count]
+                [["ticker", "zone", "from_qual_count", "from_target_count"]]
+                .assign(diff_val = lambda x: x.from_qual_count - x.from_target_count))
+        
+        display(df_qual_check.sort_values("diff_val", ascending = False))
+        return-1
         
         '''
         df_output = (df_vol_target

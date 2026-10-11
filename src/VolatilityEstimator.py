@@ -27,6 +27,8 @@ class VolEstimators:
         if not os.path.exists(self.vol_path):
             os.makedirs(self.vol_path)
             
+        self.exclude_tickers = ["ZQ"]
+            
     def _read_txt_files(self, files: list, folder: str, columns: list) -> pd.DataFrame:
         
         df_list = []
@@ -47,8 +49,25 @@ class VolEstimators:
                     
         df_out = pd.concat(df_list)
         return df_out
+    
+    def _get_date(self) -> pd.DataFrame: 
         
+        path   = os.path.join(self.data_path, "Guides", "AllVolume.parquet")
+        df_out = (pd
+                .read_parquet(path = path, engine = "pyarrow")
+                [["date"]]
+                .drop_duplicates()
+                .assign(date = lambda x: pd.to_datetime(x.date))
+                .sort_values("date"))
+        
+        return df_out
+    
     def get_prior_day_vol(self, verbose: bool = True) -> None:
+        
+        dates = (pd.DatetimeIndex(
+            self._get_date()["date"]
+            .drop_duplicates()
+            .sort_values()))
         
         if verbose: 
             print("Getting Prior Day Volatility")
@@ -78,7 +97,8 @@ class VolEstimators:
                               engine = "pyarrow")
                           .drop(columns =
                                 ["impute_open", "prior_close", "variable",
-                                 "open", "close", "name"]))
+                                 "open", "close", "name"])
+                          .loc[lambda x: ~x.ticker.isin(self.exclude_tickers)])
     
         df_time_looper = (df_times_guide
             .drop(columns=["time", "date"])
@@ -143,7 +163,6 @@ class VolEstimators:
         # ---------------------------------------------------------
         # Loop
         # ---------------------------------------------------------
-    
         stds_list = []
     
         for row in tqdm(
@@ -151,10 +170,10 @@ class VolEstimators:
             total=len(df_time_looper)
         ):
     
-            ticker = row.ticker
-            contract = row.contract
+            ticker     = row.ticker
+            contract   = row.contract
             meeting_id = row.meeting_id
-            zone = row.zone
+            zone       = row.zone
     
             tmp = date_lookup.loc[
                 (date_lookup["ticker"] == ticker)
@@ -163,41 +182,37 @@ class VolEstimators:
                 & (date_lookup["zone"] == zone)
             ].iloc[0]
     
-            date = tmp["date"]
-    
-            match_date = date - pd.Timedelta(days=1)
-    
-            match_datetimes = pd.to_datetime(
+            date       = tmp["date"]
+            idx        = dates.searchsorted(pd.Timestamp(date), side = "left") - 1
+            match_date = dates[idx] if idx > 0 else pd.NaT
+            
+            match_datetimes = pd.DatetimeIndex(
                 [
-                    f"{match_date} {time}"
+                    pd.Timestamp(match_date) + pd.Timedelta(time)
                     for time in zone_times[zone]
                 ]
             )
-    
-            values = ticker_data[ticker].reindex(match_datetimes).dropna()
-    
-            diff = values.diff().dropna()
+            
+            values          = ticker_data[ticker].reindex(match_datetimes).dropna()
+            diff            = values.diff().dropna()
     
             tmp_dict = {
-                "prior_date_start": diff.index.min(),
-                "prior_date_end": diff.index.max(),
-                "zone_date_start": tmp["zone_date_start"],
-                "zone_date_end": tmp["zone_date_end"],
-                "n": len(diff),
-                "std": diff.std()
-            }
+                "prior_date_start" : diff.index.min(),
+                "prior_date_end"   : diff.index.max(),
+                "zone_date_start"  : tmp["zone_date_start"],
+                "zone_date_end"    : tmp["zone_date_end"],
+                "n"                : len(diff),
+                "std"              : diff.std()}
     
             row_dict = {
-                "ticker": ticker,
-                "contract": contract,
-                "meeting_id": meeting_id,
-                "zone": zone
-            }
+                "ticker"     : ticker,
+                "contract"   : contract,
+                "meeting_id" : meeting_id,
+                "zone"       : zone}
     
             stds_list.append({
                 **row_dict,
-                **tmp_dict
-            })
+                **tmp_dict})
             
         df_out = pd.DataFrame(stds_list)
         
@@ -263,13 +278,14 @@ class VolEstimators:
             if verbose: print("Already have data\n")
             return None
         
-        path   = os.path.join(self.data_path, "ZoneImputedFirstRateData")
+        path   = os.path.join(self.data_path, "ZoneImputedFirstRateData")        
         df_out = (pd
                 .read_parquet(path = path, engine = "pyarrow")
                 .set_index("date")
                 [[
                     "zone", "ticker","contract", "name", 
                     "impute_open", "fomc_date"]]
+                .loc[lambda x: ~x.ticker.isin(self.exclude_tickers)]
                 .groupby(["zone", "ticker", "contract", "name", "fomc_date"])
                 .apply(lambda x: x.sort_index().impute_open.diff())
                 .to_frame(name = "tmp")
@@ -381,6 +397,21 @@ class VolEstimators:
                 .read_parquet(path = path, engine = "pyarrow")
                 [["ticker", "name", "zone", "lday_vol", "lzone_vol", "cur_vol", "meeting_id"]]
                 .assign(group_var = lambda x: x.ticker + " " + x.name + " " + x.zone))
+        
+        '''
+        flag0
+        display(df_raw
+                [["ticker", "zone", "meeting_id"]]
+                .drop_duplicates()
+                .groupby(["ticker", "zone"])
+                ["meeting_id"]
+                .agg(["min", "max", "count"])
+                .add_suffix("_val")
+                .assign(
+                    exp_val  = lambda x: x.max_val - x.min_val,
+                    diff_val = lambda x: x.exp_val - x.count_val))
+        return-1
+        '''
         
         models     = {}
         group_vars = df_raw.group_var.drop_duplicates().sort_values().to_list()

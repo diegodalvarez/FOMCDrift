@@ -26,6 +26,13 @@ class InSampleBacktest:
             
     def vol_adj_backtest(self, verbose: bool = True) -> None: 
         
+        out_path = os.path.join(self.is_back_path, "InSampleBacktest.parquet")
+        if os.path.exists(out_path): 
+            if verbose: print("Already have data\n")
+            return None
+        
+        if verbose: print("Getting Vol Targetted PnL")
+        
         path    = os.path.join(self.data_path, "", r"ZoneImputedFirstRateData")
         df_zone = (pd
             .read_parquet(path = path)
@@ -37,20 +44,6 @@ class InSampleBacktest:
             .groupby(["meeting_id", "ticker", "contract", "zone", "name"])
             .apply(lambda x: x.sort_index().impute_open.diff())
             .reset_index())
-        
-        '''
-        display(df_pnl
-                [["meeting_id", "ticker"]]
-                .drop_duplicates()
-                .groupby("ticker")
-                ["meeting_id"]
-                .agg(["min", "max", "count"])
-                .add_suffix("_event")
-                .assign(compare_val = lambda x: x.max_event - x.min_event)
-                .apply(lambda x: x.astype(int))
-                .loc[lambda x: x.count_event != x.compare_val])
-        return-1
-        '''
         
         model_path = os.path.join(self.data_path, "Volatilities", "CombinedVolEstimators.pkl")
         with open(model_path, "rb") as f: models = pickle.load(f)
@@ -80,17 +73,31 @@ class InSampleBacktest:
                 ann_vol = lambda x: x.vol_est * np.sqrt(390),
                 weight  = lambda x: 0.01 / x.ann_vol))
         
-        '''
-        display(df_vol_weighting
-                .loc[lambda x: x.ticker == "TN"]
-                .loc[lambda x: x.vol_type == x.vol_type.min()]
-                .loc[lambda x: x.zone == x.zone.min()]
-                .drop(columns = ["vol_type", "zone"])
-                .sort_values("meeting_id")
-                .loc[lambda x: x.meeting_id > 185])
-        
-        return-1
-        '''
+        df_unmatched = (df_vol_weighting
+                [["meeting_id", "ticker", "zone", "vol_type"]]
+                .drop_duplicates()
+                .groupby(["ticker", "zone", "vol_type"])
+                ["meeting_id"]
+                .agg(["min", "max", "count"])
+                .add_suffix("_val")
+                .assign(
+                    exp_val  = lambda x: x.max_val - x.min_val,
+                    diff_val = lambda x: x.exp_val - x.count_val)
+                .reset_index()
+                .sort_values("diff_val", ascending = False)
+                .loc[lambda x: x.diff_val != 0])
+
+        if len(df_unmatched) > 0: 
+            if verbose: 
+            
+                print("There are some unmatched data points {} occurances and {} occurances >= 4".format(
+                    len(df_unmatched),
+                    len(df_unmatched.loc[lambda x: x.diff_val >= 4])))
+                
+                print(df_unmatched)
+                
+        else: 
+            if verbose: print("Passed Vol Weighting Quality Check")
     
         df_vol_target = (df_pnl
             .assign(meeting_id = lambda x: x.meeting_id.astype(int))
@@ -136,19 +143,23 @@ class InSampleBacktest:
                 .merge(right = df_qual_check, how = "outer", on = ["ticker", "zone"])
                 .loc[lambda x: x.from_qual_count != x.from_target_count]
                 [["ticker", "zone", "from_qual_count", "from_target_count"]]
-                .assign(diff_val = lambda x: x.from_qual_count - x.from_target_count))
+                .assign(diff_val = lambda x: x.from_qual_count - x.from_target_count)
+                .loc[lambda x: x.diff_val != 0])
         
-        display(df_qual_check.sort_values("diff_val", ascending = False))
-        return-1
+        if len(df_qual_check) > 0:
+            if verbose:
+                print("There are {} occurances and {} occurances >= 4".format(
+                    len(df_qual_check),
+                    len(df_qual_check.loc[lambda x: x.diff_val >= 4])))
         
-        '''
-        df_output = (df_vol_target
-                [["meeting_id", "ticker", "contract", "zone", "name"]]
-                .assign(from_output = 1))
-        '''
+                print(df_qual_check)
+                
+                
+        else: 
+            if verbose: print("Passed Output Quality Check")
         
-        df_pnl_count = (df_pnl
-                .dropna()
+        df_pnl_count = (df_pnl.
+                dropna()
                 [["ticker", "contract", "meeting_id", "name", "impute_open"]]
                 .groupby(["ticker", "contract", "meeting_id", "name"])
                 .agg("count")
@@ -175,6 +186,8 @@ class InSampleBacktest:
             
         else: 
             if verbose: print("Passed Meeting Count Test")
-        return-1
+            
+        if verbose: print("Saving data\n")
+        df_vol_target.to_parquet(path = out_path, engine = "pyarrow")
         
 InSampleBacktest().vol_adj_backtest()

@@ -531,7 +531,7 @@ class VolEstimators:
 
         return models
 
-    def expanding_ols_models(self, min_obs: int = 2, verbose: bool = True) -> None:
+    def expanding_ols_models(self, min_obs: int = 30, verbose: bool = True) -> None:
 
         if verbose:
             print("Getting Expanding OLS Models")
@@ -693,7 +693,7 @@ def main() -> None:
     #vol_estimators.full_sample_ols_models()
     #vol_estimators.get_full_sample_ols_params()
     
-    #vol_estimators.expanding_ols_models()
-    #vol_estimators.get_expanding_ols_params()
+    vol_estimators.expanding_ols_models()
+    vol_estimators.get_expanding_ols_params()
     
 if __name__ == "__main__": main()

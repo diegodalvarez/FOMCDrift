@@ -197,6 +197,8 @@ class Backtester:
         # stored under meeting t was fit on meetings up to and including t.
         # Here they are lagged one meeting so meeting t is sized with the
         # latest model fit strictly before t, applied to t's own regressors.
+        # Meetings before the first model (burn-in) are sized with an
+        # empirical estimate instead; vol_source records which was used.
 
         oos_back_path = os.path.join(self.data_path, "OutSampleBacktest")
         if not os.path.exists(oos_back_path):
@@ -272,22 +274,51 @@ class Backtester:
         uses_lday  = df_lagged.vol_type.isin(["lday", "combined"])
         uses_lzone = df_lagged.vol_type.isin(["lzone", "combined"])
 
-        df_vol_weighting = (df_lagged
+        # model forecast: lagged coefficients applied to meeting t's regressors
+        # (NaN until a model trained on min_obs meetings exists)
+        # empirical forecast: lday -> prior business day vol, lzone -> prior
+        # meeting's zone vol, combined -> mean of the two (whichever exist)
+        df_lagged = (df_lagged
             .assign(
-                vol_est = lambda x:
+                model_vol_est = lambda x:
                     x.b_const
                     + np.where(uses_lday , x.b_lday  * x.lday_vol , 0)
-                    + np.where(uses_lzone, x.b_lzone * x.lzone_vol, 0))
+                    + np.where(uses_lzone, x.b_lzone * x.lzone_vol, 0),
+                empirical_vol_est = lambda x: np.select(
+                    condlist   = [
+                        x.vol_type.eq("lday"),
+                        x.vol_type.eq("lzone"),
+                        x.vol_type.eq("combined")],
+                    choicelist = [
+                        x.lday_vol,
+                        x.lzone_vol,
+                        x[["lday_vol", "lzone_vol"]].mean(axis = 1)],
+                    default    = np.nan)))
+
+        has_model = df_lagged.model_vol_est.notna()
+        pos_model = df_lagged.model_vol_est > 0
+
+        df_lagged = (df_lagged
+            .assign(
+                vol_est    = lambda x: np.where(pos_model, x.model_vol_est, x.empirical_vol_est),
+                vol_source = np.select(
+                    condlist   = [pos_model, has_model & ~pos_model],
+                    choicelist = ["model", "empirical_fallback"],
+                    default    = "empirical")))
+
+        df_vol_weighting = (df_lagged
             .dropna(subset = ["vol_est"])
             .assign(
                 ann_vol = lambda x: x.vol_est * np.sqrt(390),
                 weight  = lambda x: np.where(x.vol_est > 0, 0.01 / x.ann_vol, np.nan))
-            [["meeting_id", "ticker", "name", "zone", "vol_type", "vol_est",
-              "ann_vol", "weight", "n_obs", "model_meeting_id", "model_fomc_date", "fomc_date"]])
+            [["meeting_id", "ticker", "name", "zone", "vol_type", "vol_est", "vol_source",
+              "model_vol_est", "empirical_vol_est", "ann_vol", "weight", "n_obs",
+              "model_meeting_id", "model_fomc_date", "fomc_date"]])
 
-        # look-ahead check: the model used must be fit before the meeting traded
+        # look-ahead check: a model used must be fit before the meeting traded
         df_bad_lag = (df_vol_weighting
-            .loc[lambda x: x.model_fomc_date >= x.fomc_date])
+            .loc[lambda x: x.vol_source.eq("model")]
+            .loc[lambda x: ~(x.model_fomc_date < x.fomc_date)])
 
         if len(df_bad_lag) > 0:
             if verbose:
@@ -297,30 +328,49 @@ class Backtester:
         else:
             if verbose: print("Passed Look-Ahead Check")
 
-        # non-positive vol forecasts get no position (weight = NaN)
-        df_nonpos = (df_vol_weighting
-            .loc[lambda x: x.vol_est <= 0]
+        # non-positive model forecasts that fell back to the empirical estimate
+        df_fallback = (df_vol_weighting
+            .loc[lambda x: x.vol_source.eq("empirical_fallback")]
             .groupby(["ticker", "zone", "vol_type"])
             .size())
 
+        if len(df_fallback) > 0:
+            if verbose:
+                print("There are {} non-positive model forecasts using the empirical estimate".format(df_fallback.sum()))
+                print(df_fallback)
+
+        else:
+            if verbose: print("Passed Non-Positive Model Forecast Check")
+
+        # empirical forecasts should never be non-positive (they're std devs)
+        df_nonpos = df_vol_weighting.loc[lambda x: x.vol_est <= 0]
+
         if len(df_nonpos) > 0:
             if verbose:
-                print("There are {} non-positive vol forecasts (not traded)".format(df_nonpos.sum()))
+                print("There are {} non-positive vol estimates (not traded)".format(len(df_nonpos)))
                 print(df_nonpos)
 
         else:
             if verbose: print("Passed Non-Positive Vol Check")
 
-        # meetings lost to burn-in / no prior model
         if verbose:
-            df_burn = (df_lagged
-                .loc[lambda x: x.b_const.isna()]
+
+            # source breakdown: expect ~min_obs empirical rows per group, then model
+            print("Vol source counts by ticker, zone and vol_type")
+            print(df_vol_weighting
+                .groupby(["ticker", "zone", "vol_type", "vol_source"])
+                .size()
+                .unstack("vol_source", fill_value = 0))
+
+            # meetings with no estimate at all (expect at most 1 per group)
+            df_none = (df_lagged
+                .loc[lambda x: x.vol_est.isna()]
                 .groupby(["ticker", "zone", "vol_type"])
                 .size())
 
-            print("Meetings without an out-of-sample model (burn-in), min {} max {}".format(
-                df_burn.min() if len(df_burn) > 0 else 0,
-                df_burn.max() if len(df_burn) > 0 else 0))
+            print("Meetings without any vol estimate per group, min {} max {}".format(
+                df_none.min() if len(df_none) > 0 else 0,
+                df_none.max() if len(df_none) > 0 else 0))
 
         df_vol_target = (df_pnl
             .assign(meeting_id = lambda x: x.meeting_id.astype(int))
@@ -366,7 +416,7 @@ class Backtester:
 def main() -> None:       
  
     backtester = Backtester()
-    backtester.vol_adj_backtest_insample()
-    backtester.vol_adj_backtest_outsample()
+    #backtester.vol_adj_backtest_insample()
+    #backtester.vol_adj_backtest_outsample()
     
 if __name__ == "__main__": main()

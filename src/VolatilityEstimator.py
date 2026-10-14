@@ -495,6 +495,195 @@ class VolEstimators:
         if verbose: print("Saving data\n")
         df_out.to_parquet(path = out_path, engine = "pyarrow")
 
+    # ---------------------------------------------------------
+    # Expanding (out-of-sample) OLS volatility models
+    # ---------------------------------------------------------
+    # For each meeting t the model is fit on every meeting up to and
+    # including t and stored under t. The one-meeting lag is applied in
+    # the backtest: meeting t+1 is sized with the coefficients stored
+    # under t applied to t+1's own regressors.
+
+    def _expanding_ols_group(self, df_tmp: pd.DataFrame, x_cols: list, min_obs: int = 2) -> dict:
+
+        import warnings
+
+        df_tmp  = df_tmp.sort_values(["fomc_date", "meeting_id"]).reset_index(drop = True)
+        min_fit = max(min_obs, len(x_cols) + 1) # need at least as many obs as params
+        models  = {}
+
+        for i in range(min_fit, len(df_tmp) + 1):
+
+            df_train   = df_tmp.iloc[:i].set_index("meeting_id")
+            meeting_id = df_train.index[-1]
+
+            # small samples give exact fits (df_resid = 0) which raise
+            # divide by zero warnings for the test statistics
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+
+                model = (sm
+                    .OLS(
+                        endog = df_train.cur_vol,
+                        exog  = sm.add_constant(df_train[x_cols], has_constant = "add"))
+                    .fit())
+
+            models[meeting_id] = model
+
+        return models
+
+    def expanding_ols_models(self, min_obs: int = 2, verbose: bool = True) -> None:
+
+        if verbose:
+            print("Getting Expanding OLS Models")
+
+        out_path = os.path.join(self.vol_path, "ExpandingVolEstimators.pkl")
+
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+
+        path   = os.path.join(self.vol_path, "CombinedVolEstimators.parquet")
+        df_raw = (pd
+                .read_parquet(path = path, engine = "pyarrow")
+                [["ticker", "name", "zone", "lday_vol", "lzone_vol", "cur_vol", "meeting_id", "fomc_date"]]
+                .assign(group_var = lambda x: x.ticker + " " + x.name + " " + x.zone))
+
+        vol_specs = {
+            "lday"    : ["lday_vol"],
+            "lzone"   : ["lzone_vol"],
+            "combined": ["lzone_vol", "lday_vol"]}
+
+        models     = {}
+        check_list = []
+        group_vars = df_raw.group_var.drop_duplicates().sort_values().to_list()
+
+        if verbose: iter_ = tqdm(group_vars)
+        else      : iter_ = group_vars
+
+        for group_var in iter_:
+
+            df_tmp = (df_raw
+                    .loc[lambda x: x.group_var == group_var]
+                    .drop(columns = ["group_var"])
+                    .dropna())
+
+            if df_tmp.meeting_id.duplicated().any():
+                if verbose: print("Duplicate meeting_id in {}".format(group_var))
+
+            for vol_type, x_cols in vol_specs.items():
+
+                group_models = self._expanding_ols_group(
+                    df_tmp  = df_tmp,
+                    x_cols  = x_cols,
+                    min_obs = min_obs)
+
+                models[group_var + " " + vol_type] = group_models
+
+                check_list.append({
+                    "model_name": group_var + " " + vol_type,
+                    "n_input"   : len(df_tmp),
+                    "burn_in"   : max(min_obs, len(x_cols) + 1) - 1,
+                    "n_models"  : len(group_models)})
+
+        df_check = (pd
+                .DataFrame(check_list)
+                .assign(exp_models = lambda x: (x.n_input - x.burn_in).clip(lower = 0))
+                .loc[lambda x: x.exp_models != x.n_models])
+
+        if len(df_check) > 0:
+            if verbose:
+                print("Model counts don't match input counts less burn-in")
+                print(df_check)
+
+        else:
+            if verbose: print("Passed model count check")
+
+        if verbose: print("Saving data\n")
+        with open(out_path, "wb") as f: pickle.dump(models, f)
+
+    def get_expanding_ols_params(self, verbose: bool = True) -> None:
+
+        import warnings
+
+        if verbose: print("Getting Expanding OLS Params")
+
+        out_path = os.path.join(self.vol_path, "ExpandingVolOLSParams.parquet")
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+
+        model_path = os.path.join(self.vol_path, "ExpandingVolEstimators.pkl")
+        with open(model_path, "rb") as f: models = pickle.load(f)
+
+        df_lists = []
+
+        if verbose: iter_ = tqdm(models.keys())
+        else      : iter_ = models.keys()
+
+        for model_name in iter_:
+
+            ticker, name, zone, vol_type = model_name.split(" ")
+
+            for meeting_id, tmp_model in models[model_name].items():
+
+                train_index = tmp_model.fittedvalues.index
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+
+                    df_add = (pd.DataFrame({
+                            "param" : tmp_model.params,
+                            "pvalue": tmp_model.pvalues,
+                            "tvalue": tmp_model.tvalues})
+                        .rename_axis("index")
+                        .reset_index()
+                        .assign(
+                            model_name          = model_name,
+                            meeting_id          = meeting_id,
+                            r2                  = tmp_model.rsquared,
+                            adj_r2              = tmp_model.rsquared_adj,
+                            n_obs               = int(tmp_model.nobs),
+                            train_first_meeting = train_index[0],
+                            train_last_meeting  = train_index[-1],
+                            ticker              = ticker,
+                            name                = name,
+                            zone                = zone,
+                            vol_type            = vol_type))
+
+                df_lists.append(df_add)
+
+        df_out = pd.concat(df_lists, ignore_index = True)
+
+        # the model stored under meeting t must end its training at t
+        df_bad1 = df_out.loc[lambda x: x.train_last_meeting != x.meeting_id]
+
+        if len(df_bad1) > 0:
+            if verbose:
+                print("Training window doesn't end at the stored meeting")
+                print(df_bad1)
+
+        else:
+            if verbose: print("Passed training window end check")
+
+        # training sample should grow by exactly one meeting at a time
+        df_bad2 = (df_out
+                [["model_name", "meeting_id", "n_obs"]]
+                .drop_duplicates()
+                .sort_values(["model_name", "n_obs"])
+                .assign(n_diff = lambda x: x.groupby("model_name").n_obs.diff())
+                .loc[lambda x: x.n_diff.notna() & (x.n_diff != 1)])
+
+        if len(df_bad2) > 0:
+            if verbose:
+                print("Training sample isn't expanding one meeting at a time")
+                print(df_bad2)
+
+        else:
+            if verbose: print("Passed expanding window check")
+
+        if verbose: print("Saving data\n")
+        df_out.to_parquet(path = out_path, engine = "pyarrow")
+
 def main() -> None: 
         
     vol_estimators = VolEstimators()
@@ -503,5 +692,8 @@ def main() -> None:
     #vol_estimators.combine_vols()
     #vol_estimators.full_sample_ols_models()
     #vol_estimators.get_full_sample_ols_params()
+    
+    #vol_estimators.expanding_ols_models()
+    #vol_estimators.get_expanding_ols_params()
     
 if __name__ == "__main__": main()

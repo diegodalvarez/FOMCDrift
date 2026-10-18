@@ -496,6 +496,213 @@ class VolEstimators:
         df_out.to_parquet(path = out_path, engine = "pyarrow")
 
     # ---------------------------------------------------------
+    # Train / test split OLS volatility models
+    # ---------------------------------------------------------
+    # The split is defined once over the global FOMC meeting sequence and
+    # saved to data/Guides/TrainTestSplit.parquet so the backtest and the
+    # signal generator split on the same meeting. Models are fit on train
+    # meetings only and held fixed for every test meeting.
+
+    def train_test_split(self, train_ratio: float = 0.7, verbose: bool = True) -> None:
+
+        if verbose: print("Getting Train / Test Split")
+
+        out_path = os.path.join(self.data_path, "Guides", "TrainTestSplit.parquet")
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+
+        path        = os.path.join(self.vol_path, "CombinedVolEstimators.parquet")
+        df_meetings = (pd
+                .read_parquet(path = path, engine = "pyarrow")
+                [["meeting_id", "fomc_date"]]
+                .drop_duplicates()
+                .assign(meeting_id = lambda x: x.meeting_id.astype(int))
+                .sort_values(["fomc_date", "meeting_id"])
+                .reset_index(drop = True))
+
+        # one fomc_date per meeting_id, otherwise the ordering is ambiguous
+        if df_meetings.meeting_id.duplicated().any():
+            if verbose:
+                print("Some meeting_ids map to more than one fomc_date")
+                print(df_meetings.loc[lambda x: x.meeting_id.duplicated(keep = False)])
+
+        else:
+            if verbose: print("Passed one date per meeting check")
+
+        n_meetings = len(df_meetings)
+        n_train    = int(np.floor(n_meetings * train_ratio))
+        n_train    = min(max(n_train, 1), n_meetings - 1)
+
+        df_out = (df_meetings
+                .assign(
+                    split       = lambda x: np.where(x.index < n_train, "train", "test"),
+                    train_ratio = train_ratio))
+
+        if verbose:
+
+            df_train = df_out.loc[lambda x: x.split == "train"]
+            df_test  = df_out.loc[lambda x: x.split == "test"]
+
+            print("Train: {} meetings, {} to {}".format(
+                len(df_train), df_train.fomc_date.min().date(), df_train.fomc_date.max().date()))
+
+            print("Test : {} meetings, {} to {}".format(
+                len(df_test), df_test.fomc_date.min().date(), df_test.fomc_date.max().date()))
+
+            print("Saving data\n")
+
+        df_out.to_parquet(path = out_path, engine = "pyarrow")
+
+    def _get_train_test_split(self) -> pd.DataFrame:
+
+        path   = os.path.join(self.data_path, "Guides", "TrainTestSplit.parquet")
+        df_out = (pd
+                .read_parquet(path = path, engine = "pyarrow")
+                [["meeting_id", "split"]]
+                .assign(meeting_id = lambda x: x.meeting_id.astype(int)))
+
+        return df_out
+
+    def train_test_ols_models(self, verbose: bool = True) -> None:
+
+        if verbose: print("Getting Train / Test OLS Models")
+
+        out_path = os.path.join(self.vol_path, "TrainTestVolEstimators.pkl")
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+
+        df_split = self._get_train_test_split()
+
+        path   = os.path.join(self.vol_path, "CombinedVolEstimators.parquet")
+        df_raw = (pd
+                .read_parquet(path = path, engine = "pyarrow")
+                [["ticker", "name", "zone", "lday_vol", "lzone_vol", "cur_vol", "meeting_id"]]
+                .assign(meeting_id = lambda x: x.meeting_id.astype(int))
+                .merge(right = df_split, how = "left", on = ["meeting_id"])
+                .assign(group_var = lambda x: x.ticker + " " + x.name + " " + x.zone))
+
+        # every meeting should have been assigned to train or test
+        n_unsplit = df_raw.split.isna().sum()
+
+        if n_unsplit > 0:
+            if verbose: print("There are {} rows without a train / test split".format(n_unsplit))
+
+        else:
+            if verbose: print("Passed split coverage check")
+
+        vol_specs = {
+            "lday"    : ["lday_vol"],
+            "lzone"   : ["lzone_vol"],
+            "combined": ["lzone_vol", "lday_vol"]}
+
+        models     = {}
+        check_list = []
+        group_vars = df_raw.group_var.drop_duplicates().sort_values().to_list()
+
+        if verbose: iter_ = tqdm(group_vars)
+        else      : iter_ = group_vars
+
+        for group_var in iter_:
+
+            df_tmp = (df_raw
+                    .loc[lambda x: (x.group_var == group_var) & (x.split == "train")]
+                    .drop(columns = ["group_var", "split"])
+                    .dropna()
+                    .set_index("meeting_id"))
+
+            for vol_type, x_cols in vol_specs.items():
+
+                # need more observations than parameters to fit
+                if len(df_tmp) <= len(x_cols) + 1:
+
+                    check_list.append({
+                        "model_name": group_var + " " + vol_type,
+                        "n_train"   : len(df_tmp)})
+
+                    continue
+
+                model = (sm
+                        .OLS(
+                            endog = df_tmp.cur_vol,
+                            exog  = sm.add_constant(df_tmp[x_cols], has_constant = "add"))
+                        .fit())
+
+                models[group_var + " " + vol_type] = model
+
+        if len(check_list) > 0:
+            if verbose:
+                print("There are {} models without enough train meetings to fit".format(len(check_list)))
+                print(pd.DataFrame(check_list))
+
+        else:
+            if verbose: print("Passed train sample size check")
+
+        if verbose: print("Saving data\n")
+        with open(out_path, "wb") as f: pickle.dump(models, f)
+
+    def get_train_test_ols_params(self, verbose: bool = True) -> None:
+
+        if verbose: print("Getting Train / Test OLS Params")
+
+        out_path = os.path.join(self.vol_path, "TrainTestVolOLSParams.parquet")
+        if os.path.exists(out_path):
+            if verbose: print("Already have data\n")
+            return None
+
+        model_path = os.path.join(self.vol_path, "TrainTestVolEstimators.pkl")
+        with open(model_path, "rb") as f: models = pickle.load(f)
+
+        df_split  = self._get_train_test_split()
+        train_ids = df_split.loc[lambda x: x.split == "train"].meeting_id
+        cutoff    = int(train_ids.max())
+
+        df_lists = []
+        for model_name in models.keys():
+
+            tmp_model                    = models[model_name]
+            ticker, name, zone, vol_type = model_name.split(" ")
+            train_index                  = tmp_model.fittedvalues.index
+
+            df_add = (pd.DataFrame({
+                    "param" : tmp_model.params,
+                    "pvalue": tmp_model.pvalues,
+                    "tvalue": tmp_model.tvalues})
+                .rename_axis("index")
+                .reset_index()
+                .assign(
+                    model_name          = model_name,
+                    r2                  = tmp_model.rsquared,
+                    adj_r2              = tmp_model.rsquared_adj,
+                    n_obs               = int(tmp_model.nobs),
+                    train_first_meeting = int(train_index.min()),
+                    train_last_meeting  = int(train_index.max()),
+                    cutoff_meeting      = cutoff,
+                    ticker              = ticker,
+                    name                = name,
+                    zone                = zone,
+                    vol_type            = vol_type))
+
+            df_lists.append(df_add)
+
+        df_out = pd.concat(df_lists, ignore_index = True)
+
+        # look-ahead: no model may be trained on a test meeting
+        df_bad = df_out.loc[lambda x: x.train_last_meeting > x.cutoff_meeting]
+
+        if len(df_bad) > 0:
+            if verbose:
+                print("Look-ahead: {} models trained past the cutoff meeting".format(df_bad.model_name.nunique()))
+                print(df_bad[["model_name", "train_last_meeting", "cutoff_meeting"]].drop_duplicates())
+
+        else:
+            if verbose: print("Passed Look-Ahead Check")
+
+        if verbose: print("Saving data\n")
+        df_out.to_parquet(path = out_path, engine = "pyarrow")
+
+    # ---------------------------------------------------------
     # Expanding (out-of-sample) OLS volatility models
     # ---------------------------------------------------------
     # For each meeting t the model is fit on every meeting up to and
@@ -693,7 +900,11 @@ def main() -> None:
     #vol_estimators.full_sample_ols_models()
     #vol_estimators.get_full_sample_ols_params()
     
-    vol_estimators.expanding_ols_models()
-    vol_estimators.get_expanding_ols_params()
-    
+    #vol_estimators.expanding_ols_models()
+    #vol_estimators.get_expanding_ols_params()
+
+    vol_estimators.train_test_split()
+    vol_estimators.train_test_ols_models()
+    vol_estimators.get_train_test_ols_params()
+
 if __name__ == "__main__": main()

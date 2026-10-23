@@ -50,7 +50,9 @@ MODELS = ["ols", "logit"]
 # default specs, add new ones here
 SPECS = [
     {"model": "ols"  , "target": "cum_rtn", "features": ["lag_mean_rtn"]},
-    {"model": "logit", "target": "cum_rtn", "features": ["lag_mean_rtn"]}]
+    {"model": "logit", "target": "cum_rtn", "features": ["lag_mean_rtn"]},
+    {"model": "ols"  , "target": "cum_rtn", "features": ["lag_mean_rtn_nz"]},
+    {"model": "logit", "target": "cum_rtn", "features": ["lag_mean_rtn_nz"]}]
 
 
 class EventModels:

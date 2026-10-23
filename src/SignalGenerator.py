@@ -73,17 +73,19 @@ class SignalGenerator:
 
         return df_out
 
-    def _get_event_rtn(self, scheme: str) -> pd.DataFrame:
+    def _get_event_rtn(self, scheme: str, rtn_col: str = "mean_rtn") -> pd.DataFrame:
 
-        # one row per event: mean vol_rtn within that meeting's zone, read
-        # from the EventFeatures table (mean_rtn). Signals are built from
-        # these so every event gets equal weight regardless of how many
-        # minutes it has. split is carried through (full / train / test / oos)
+        # one row per event: an event return column from the EventFeatures
+        # table (mean_rtn, or mean_rtn_nz to drop zero return minutes).
+        # Signals are built from these so every event gets equal weight
+        # regardless of how many minutes it has. split is carried through
+        # (full / train / test / oos). Events with a missing rtn_col (all
+        # zero minutes for mean_rtn_nz) are dropped
         path   = os.path.join(self.feature_path, SCHEME_FILES[scheme])
         df_out = (pd
             .read_parquet(path = path, engine = "pyarrow")
-            [EVENT_COLS + ["split", "mean_rtn"]]
-            .rename(columns = {"mean_rtn": "event_rtn"})
+            [EVENT_COLS + ["split", rtn_col]]
+            .rename(columns = {rtn_col: "event_rtn"})
             .dropna(subset = ["event_rtn"])
             .assign(meeting_id = lambda x: x.meeting_id.astype(int))
             .sort_values(EVENT_COLS)
@@ -204,13 +206,14 @@ class SignalGenerator:
             signal_name: str,
             estimator  : str,
             min_events : int,
-            verbose    : bool) -> pd.DataFrame:
+            verbose    : bool,
+            rtn_col    : str = "mean_rtn") -> pd.DataFrame:
 
         df_lists = []
         for scheme in SCHEME_FILES.keys():
 
-            if verbose: print("Building {} {} signals from {}".format(signal_name, scheme, SCHEME_FILES[scheme]))
-            df_event = self._get_event_rtn(scheme)
+            if verbose: print("Building {} {} signals from {} ({})".format(signal_name, scheme, SCHEME_FILES[scheme], rtn_col))
+            df_event = self._get_event_rtn(scheme, rtn_col = rtn_col)
 
             if scheme == "in_sample":
                 df_add = self._in_sample(df_event, estimator)
@@ -252,6 +255,34 @@ class SignalGenerator:
             estimator   = "mean",
             min_events  = min_events,
             verbose     = verbose)
+
+        self._check_signals(df_signal, verbose = verbose)
+
+        if verbose: print("Saving data\n")
+        df_signal.to_parquet(path = out_path, engine = "pyarrow")
+
+    def historical_event_mean_nonzero(
+            self,
+            min_events: int  = 30,
+            overwrite : bool = False,
+            verbose   : bool = True) -> None:
+
+        # Strategy 1 without zero return minutes: same as historical_event_mean
+        # but each event's return is the mean over its non-zero minutes
+        # (mean_rtn_nz), so events with many zero minutes aren't pulled toward
+        # zero. Traded the same way, apply_signal("HistoricalEventMeanNonZero", ...)
+
+        out_path = os.path.join(self.signal_path, "HistoricalEventMeanNonZero.parquet")
+        if os.path.exists(out_path) and not overwrite:
+            if verbose: print("Already have data\n")
+            return None
+
+        df_signal = self._build_signal(
+            signal_name = "HistoricalEventMeanNonZero",
+            estimator   = "mean",
+            min_events  = min_events,
+            verbose     = verbose,
+            rtn_col     = "mean_rtn_nz")
 
         self._check_signals(df_signal, verbose = verbose)
 
@@ -335,5 +366,6 @@ def main() -> None:
 
     signal_generator = SignalGenerator()
     signal_generator.historical_event_mean()
+    signal_generator.historical_event_mean_nonzero()
 
 if __name__ == "__main__": main()

@@ -15,7 +15,8 @@ One row per ticker x zone x name x vol_type x meeting_id with
     split            full / train / test / oos (from the vol normalized returns)
     event_start      first minute of the event
     n_bars           number of non-missing minute returns in the event
-    <targets>        one column per entry in TARGETS (endog candidates)
+    <targets>        one column per entry in TARGETS (endog candidates),
+                     _nz columns drop minutes with a zero return
     prior_meeting_id meeting the lagged features come from
     <features>       one column per entry in FEATURES (exog candidates)
 
@@ -50,14 +51,29 @@ def _prior_event(df: pd.DataFrame, col: str, n: int = 1) -> pd.Series:
     # df must be sorted by GROUP_COLS + meeting_id
     return df.groupby(GROUP_COLS)[col].shift(n)
 
-# endog candidates: aggregation of the event's minute vol_rtn
+def _nonzero_mean(s: pd.Series) -> float:
+
+    # mean over minutes with a non-zero return (NaN if every minute is zero)
+    s = s.loc[s != 0]
+    return s.mean() if len(s) > 0 else np.nan
+
+def _nonzero_count(s: pd.Series) -> int:
+
+    return int((s != 0).sum())
+
+# endog candidates: aggregation of the event's minute vol_rtn. The _nz
+# versions drop minutes with a zero return; sums are unaffected by zeros so
+# there is no cum_rtn_nz
 TARGETS = {
-    "cum_rtn" : "sum",
-    "mean_rtn": "mean"}
+    "cum_rtn"    : "sum",
+    "mean_rtn"   : "mean",
+    "mean_rtn_nz": _nonzero_mean,
+    "n_bars_nz"  : _nonzero_count}
 
 # exog candidates: functions of the event table, prior events only
 FEATURES = {
-    "lag_mean_rtn": lambda df: _prior_event(df, "mean_rtn")}
+    "lag_mean_rtn"   : lambda df: _prior_event(df, "mean_rtn"),
+    "lag_mean_rtn_nz": lambda df: _prior_event(df, "mean_rtn_nz")}
 
 
 class EventFeatures:
@@ -72,7 +88,7 @@ class EventFeatures:
 
         if not os.path.exists(self.feature_path):
             os.makedirs(self.feature_path)
-            
+
     # ------------------------------------------------------------------ data
 
     def _get_vol_rtn(self, scheme: str) -> pd.DataFrame:
@@ -153,6 +169,18 @@ class EventFeatures:
                 .agg(["count", "max"]))
         else: print("Passed Meeting Gap Check")
 
+        # zero minute returns: share of minutes and events with only zeros
+        # (all-zero events get NaN in the _nz columns)
+        print("Zero return minutes and all-zero events by ticker and zone ({})".format(scheme))
+        print(df_out
+            .groupby(["ticker", "zone"])
+            .agg(
+                n_bars    = ("n_bars", "sum"),
+                n_bars_nz = ("n_bars_nz", "sum"),
+                zero_evts = ("n_bars_nz", lambda x: (x == 0).sum()))
+            .assign(zero_share = lambda x: 1 - x.n_bars_nz / x.n_bars)
+            [["zero_share", "zero_evts"]])
+
         print("Missing values per feature ({})".format(scheme))
         print(df_out
             [list(FEATURES.keys())]
@@ -172,11 +200,22 @@ class EventFeatures:
 
         for scheme, file in SCHEME_FILES.items():
 
+            # skip a cached file only if it already has every registered
+            # target and feature column, otherwise rebuild it so new
+            # TARGETS / FEATURES entries get added
             out_path = os.path.join(self.feature_path, file)
             if os.path.exists(out_path) and not overwrite:
-                if verbose: print("Already have {}\n".format(file))
-                continue
-            
+
+                expected = list(TARGETS.keys()) + list(FEATURES.keys())
+                columns  = pd.read_parquet(path = out_path, engine = "pyarrow").columns
+                missing  = [col for col in expected if col not in columns]
+
+                if len(missing) == 0:
+                    if verbose: print("Already have {}\n".format(file))
+                    continue
+
+                if verbose: print("{} is missing {}, rebuilding".format(file, missing))
+
             if verbose: print("Building {} event features".format(scheme))
 
             # split must be constant within an event

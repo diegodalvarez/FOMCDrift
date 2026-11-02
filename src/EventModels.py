@@ -32,6 +32,10 @@ Output: data/Models/<spec_name>/
     Models.pkl           fitted statsmodels results for in_sample and
                          train_test keyed "<scheme> <ticker> <name> <zone> <vol_type>"
     Spec.json            the spec and settings that produced the folder
+
+fit_quick fits the same way on any event-level signal DataFrame (any number
+of signal columns) and returns the predictions and params without saving,
+for testing signals before they become specs.
 """
 
 import os
@@ -352,6 +356,99 @@ class EventModels:
 
         with open(os.path.join(out_dir, "Spec.json"), "w") as f:
             json.dump({**spec, "spec_name": spec_name, "min_obs": min_obs, "group_cols": GROUP_COLS}, f, indent = 4)
+
+    # --------------------------------------------------------------- quick
+
+    def fit_quick(
+            self,
+            df_signals: pd.DataFrame,
+            features  : list,
+            models    : list = ["ols", "logit"],
+            target    : str  = "cum_rtn",
+            schemes   : list = ["in_sample"],
+            min_obs   : int  = 30,
+            verbose   : bool = True) -> tuple:
+
+        # Fits models on any event-level signals without saving anything, for
+        # testing signals in the notebook.
+        #
+        # df_signals: EVENT_COLS + one or more signal columns (any number).
+        #   Each signal on meeting t must only use information from before t,
+        #   nothing here lags it. Build them from the same sample as the
+        #   scheme (in_sample signals from InSample data, etc).
+        # features: which signal columns to fit on, all in one model.
+        # target: taken from df_signals if it has the column, otherwise from
+        #   the EventFeatures table of each scheme, merged on EVENT_COLS.
+        #
+        # Uses the same fitting as run (per GROUP_COLS, z-scored features,
+        # train-only / expanding fits). Returns (df_pred, df_params) with
+        # model, scheme and spec_name columns.
+
+        missing = [col for col in features if col not in df_signals.columns]
+        if len(missing) > 0:
+            raise ValueError("{} not in df_signals".format(missing))
+
+        bad_models = [model for model in models if model not in MODELS]
+        if len(bad_models) > 0:
+            raise ValueError("models must be in {}".format(MODELS))
+
+        # one row per event, otherwise the merge onto the target duplicates
+        n_dup = df_signals.duplicated(subset = EVENT_COLS).sum()
+        if n_dup > 0:
+            raise ValueError("df_signals has {} duplicated events on {}".format(n_dup, EVENT_COLS))
+
+        own_target  = target in df_signals.columns
+        signal_cols = features + ([target] if own_target else [])
+
+        df_signals = (df_signals
+            [EVENT_COLS + signal_cols]
+            .assign(meeting_id = lambda x: x.meeting_id.astype(int)))
+
+        pred_list, param_list, skip_list = [], [], []
+
+        for scheme in schemes:
+
+            # split (and the target, unless supplied) come from the scheme's
+            # event table so train / test match the vol normalized returns
+            feature_cols = EVENT_COLS + ["split"] + ([] if own_target else [target])
+            df_scheme    = (self
+                .event_features
+                .load(scheme)
+                [feature_cols]
+                .assign(meeting_id = lambda x: x.meeting_id.astype(int))
+                .merge(right = df_signals, how = "inner", on = EVENT_COLS))
+
+            if verbose: print("{}: {} events with signals".format(scheme, len(df_scheme)))
+
+            for model in models:
+
+                spec      = {"model": model, "target": target, "features": features}
+                spec_name = self.spec_name(spec)
+
+                preds, params, skips, _ = self._fit_scheme(df_scheme, scheme, spec, min_obs, verbose)
+
+                pred_list  += [df_add.assign(scheme = scheme, model = model, spec_name = spec_name) for df_add in preds]
+                param_list += [df_add.assign(scheme = scheme, model = model, spec_name = spec_name) for df_add in params]
+                skip_list  += [{**skip, "model": model} for skip in skips]
+
+        if len(pred_list) == 0:
+            if verbose: print("No models could be fit")
+            return pd.DataFrame(), pd.DataFrame()
+
+        df_pred   = pd.concat(pred_list , ignore_index = True)
+        df_params = pd.concat(param_list, ignore_index = True)
+
+        # duplicate check is per model since several models share one frame
+        if verbose:
+            for model, df_model in df_pred.groupby("model"):
+                print("Checks for {}".format(model))
+                self._check_models(
+                    df_model,
+                    df_params.loc[lambda x: x.model == model],
+                    pd.DataFrame([skip for skip in skip_list if skip["model"] == model]),
+                    verbose = verbose)
+
+        return df_pred, df_params
 
     # --------------------------------------------------------------- probe
 

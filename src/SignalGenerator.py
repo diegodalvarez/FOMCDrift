@@ -321,7 +321,6 @@ class SignalGenerator:
 
         path      = os.path.join(self.model_path, spec_name, "Predictions.parquet")
         df_signal = pd.read_parquet(path = path, engine = "pyarrow")
-
         return self.apply_event_signal(df_signal, scheme, vol_types)
 
     def apply_event_signal(
@@ -365,7 +364,8 @@ class SignalGenerator:
 def main() -> None:
 
     signal_generator = SignalGenerator()
-    signal_generator.historical_event_mean()
-    signal_generator.historical_event_mean_nonzero()
+    #signal_generator.historical_event_mean()
+    #signal_generator.historical_event_mean_nonzero()
+    signal_generator.apply_model(spec_name = "logit__cum_rtn__lag_mean_rtn_nz", scheme = "in_sample")
 
 if __name__ == "__main__": main()

@@ -6,8 +6,13 @@ Fits event-level models on the tables built by EventFeatures.py under each
 scheme and saves everything needed to probe them later.
 
 A model spec is a dict
-    {"model": "ols" | "logit", "target": <TARGETS name>, "features": [<FEATURES names>]}
+    {"model": <registered model>, "target": <TARGETS name>, "features": [<FEATURES names>]}
 named <model>__<target>__<feature-feature-...>, e.g. ols__cum_rtn__lag_mean_rtn.
+
+Models are defined in ModelRegistry.py (ols, logit, rule built in); nothing
+here depends on a particular model, so a newly registered model works with
+run, fit_quick, fit_feature_sets and every scheme. catalog() lists the
+models, targets, features, saved signals and saved specs available.
 
 Models are fit per ticker x zone x name x vol_type (GROUP_COLS)
 
@@ -35,7 +40,8 @@ Output: data/Models/<spec_name>/
 
 fit_quick fits the same way on any event-level signal DataFrame (any number
 of signal columns) and returns the predictions and params without saving,
-for testing signals before they become specs.
+for testing signals before they become specs. fit_feature_sets runs
+fit_quick over several named feature sets at once.
 """
 
 import os
@@ -47,9 +53,8 @@ import pandas as pd
 import statsmodels.api as sm
 
 from tqdm import tqdm
-from EventFeatures import EventFeatures, SCHEME_FILES, GROUP_COLS, EVENT_COLS
-
-MODELS = ["ols", "logit"]
+from EventFeatures import EventFeatures, SCHEME_FILES, GROUP_COLS, EVENT_COLS, TARGETS, FEATURES
+from ModelRegistry import get_model, model_names, list_models
 
 # default specs, add new ones here
 SPECS = [
@@ -81,8 +86,8 @@ class EventModels:
 
     def _check_spec(self, spec: dict, df: pd.DataFrame) -> None:
 
-        if spec["model"] not in MODELS:
-            raise ValueError("model must be one of {}".format(MODELS))
+        if spec["model"] not in model_names():
+            raise ValueError("model must be one of {}".format(model_names()))
 
         missing = [col for col in [spec["target"]] + spec["features"] if col not in df.columns]
         if len(missing) > 0:
@@ -90,50 +95,35 @@ class EventModels:
 
     # ----------------------------------------------------------------- fit
 
-    def _endog(self, target: pd.Series, model: str) -> pd.Series:
-
-        if model == "logit": return (target > 0).astype(int)
-        return target
-
     def _design(self, df: pd.DataFrame, features: list, x_mean: pd.Series, x_std: pd.Series) -> pd.DataFrame:
 
         X = (df[features] - x_mean) / x_std
         return sm.add_constant(X, has_constant = "add")
 
-    def _fit(self, model: str, y: pd.Series, X: pd.DataFrame) -> tuple:
-
-        # small or separable samples raise warnings (and sometimes errors);
-        # failures return None and non-convergence is flagged, not dropped
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-
-            try:
-                if model == "ols":
-                    res       = sm.OLS(endog = y, exog = X).fit()
-                    converged = True
-
-                elif model == "logit":
-                    res       = sm.Logit(endog = y, exog = X).fit(disp = 0, maxiter = 100)
-                    converged = bool(res.mle_retvals.get("converged", False))
-
-            except Exception:
-                return None, False
-
-        return res, converged
-
     def _fit_predict(self, df_fit: pd.DataFrame, df_pred: pd.DataFrame, spec: dict) -> dict:
 
-        # fits on df_fit and predicts df_pred. Returns None (with a reason)
-        # when the fit sample can't support the model
-        model, target, features = spec["model"], spec["target"], spec["features"]
+        # fits on df_fit and predicts df_pred with the registered model.
+        # Returns {"reason": ...} when the fit sample can't support it
+        model    = get_model(spec["model"])
+        target   = spec["target"]
+        features = spec["features"]
 
-        y = self._endog(df_fit[target], model)
+        if len(df_fit) == 0:
+            return {"reason": "no fit events"}
+
+        # models that only read the (already lagged) features
+        if not model.needs_fit:
+            prediction = model.predict(None, None, df_pred[features])
+            return {"res": None, "converged": True, "prediction": prediction}
 
         if len(df_fit) <= len(features) + 1:
             return {"reason": "too few events"}
 
-        if model == "logit" and y.nunique() < 2:
-            return {"reason": "one class only"}
+        y      = model.endog(df_fit[target])
+        reason = model.check(y)
+
+        if reason is not None:
+            return {"reason": reason}
 
         x_mean = df_fit[features].mean()
         x_std  = df_fit[features].std()
@@ -141,14 +131,20 @@ class EventModels:
         if x_std.isna().any() or (x_std == 0).any():
             return {"reason": "constant feature"}
 
-        res, converged = self._fit(model, y, self._design(df_fit, features, x_mean, x_std))
-
-        if res is None:
-            return {"reason": "fit failed"}
-
+        # small or separable samples raise warnings (and sometimes errors);
+        # failures are skipped and non-convergence is flagged, not dropped
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            prediction = np.asarray(res.predict(self._design(df_pred, features, x_mean, x_std)))
+
+            try:
+                res, converged = model.fit(y, self._design(df_fit, features, x_mean, x_std))
+            except Exception:
+                return {"reason": "fit failed"}
+
+            if res is None:
+                return {"reason": "fit failed"}
+
+            prediction = model.predict(res, self._design(df_pred, features, x_mean, x_std), df_pred[features])
 
         return {
             "res"       : res,
@@ -161,7 +157,7 @@ class EventModels:
 
     def _prediction_frame(self, df_fit: pd.DataFrame, df_pred: pd.DataFrame, out: dict, spec: dict) -> pd.DataFrame:
 
-        signal = out["prediction"] - 0.5 if spec["model"] == "logit" else out["prediction"]
+        signal = get_model(spec["model"]).to_signal(out["prediction"])
 
         df_out = (df_pred
             [EVENT_COLS + ["split", spec["target"]]]
@@ -178,21 +174,17 @@ class EventModels:
 
     def _params_frame(self, df_fit: pd.DataFrame, out: dict, spec: dict, keys: dict, predict_meeting: float = np.nan) -> pd.DataFrame:
 
-        res = out["res"]
+        res   = out["res"]
+        model = get_model(spec["model"])
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            df_out = (pd.DataFrame({
-                    "coeff" : res.params,
-                    "bse"   : res.bse,
-                    "tvalue": res.tvalues,
-                    "pvalue": res.pvalues})
-                .rename_axis("param")
-                .reset_index()
+            df_out = (model
+                .params(res)
                 .assign(
-                    r2                = res.rsquared if spec["model"] == "ols" else res.prsquared,
-                    n_obs             = int(res.nobs),
+                    r2                = model.fit_stat(res),
+                    n_obs             = len(df_fit),
                     converged         = out["converged"],
                     first_fit_meeting = int(df_fit.meeting_id.min()),
                     last_fit_meeting  = int(df_fit.meeting_id.max()),
@@ -234,8 +226,10 @@ class EventModels:
                     continue
 
                 pred_list.append(self._prediction_frame(df_fit, df_group, out, spec))
-                param_list.append(self._params_frame(df_fit, out, spec, keys))
-                models[model_key] = out["res"]
+
+                if out["res"] is not None:
+                    param_list.append(self._params_frame(df_fit, out, spec, keys))
+                    models[model_key] = out["res"]
 
             elif scheme == "out_sample":
 
@@ -255,8 +249,10 @@ class EventModels:
                         continue
 
                     pred_list.append(self._prediction_frame(df_fit, df_pred, out, spec))
-                    param_list.append(self._params_frame(
-                        df_fit, out, spec, keys, predict_meeting = int(df_pred.meeting_id.iloc[0])))
+
+                    if out["res"] is not None:
+                        param_list.append(self._params_frame(
+                            df_fit, out, spec, keys, predict_meeting = int(df_pred.meeting_id.iloc[0])))
 
         return pred_list, param_list, skip_list, models
 
@@ -388,9 +384,9 @@ class EventModels:
         if len(missing) > 0:
             raise ValueError("{} not in df_signals".format(missing))
 
-        bad_models = [model for model in models if model not in MODELS]
+        bad_models = [model for model in models if model not in model_names()]
         if len(bad_models) > 0:
-            raise ValueError("models must be in {}".format(MODELS))
+            raise ValueError("models must be in {}".format(model_names()))
 
         # one row per event, otherwise the merge onto the target duplicates
         n_dup = df_signals.duplicated(subset = EVENT_COLS).sum()
@@ -450,7 +446,91 @@ class EventModels:
 
         return df_pred, df_params
 
+    def fit_feature_sets(
+            self,
+            data        : pd.DataFrame,
+            feature_sets: dict,
+            models      : list = ["ols", "logit"],
+            target      : str  = "cum_rtn",
+            schemes     : list = ["in_sample"],
+            min_obs     : int  = 30,
+            verbose     : bool = True) -> tuple:
+
+        # Runs fit_quick once per feature set and stacks the results.
+        #
+        # data        : event-level DataFrame with EVENT_COLS, target (or it is
+        #               taken from EventFeatures) and every feature column,
+        #               already lagged
+        # feature_sets: {set_name: [feature columns]}, each set is one model
+        # models      : any registered model (ModelRegistry.model_names())
+        #
+        # Returns (df_pred, df_params), both with a feature_set column. Turn
+        # df_pred into minute returns with
+        # StrategyEvaluation.feature_set_returns
+
+        missing = sorted(set(
+            col for features in feature_sets.values() for col in features
+            if col not in data.columns))
+
+        if len(missing) > 0:
+            raise ValueError("{} not in data".format(missing))
+
+        pred_list, param_list = [], []
+
+        for set_name, features in feature_sets.items():
+
+            if verbose: print("Feature set: {} {}".format(set_name, features))
+
+            df_pred, df_params = self.fit_quick(
+                df_signals = data,
+                features   = features,
+                models     = models,
+                target     = target,
+                schemes    = schemes,
+                min_obs    = min_obs,
+                verbose    = verbose)
+
+            if len(df_pred) > 0:
+                pred_list.append(df_pred.assign(feature_set = set_name))
+
+            if len(df_params) > 0:
+                param_list.append(df_params.assign(feature_set = set_name))
+
+        df_pred   = pd.concat(pred_list , ignore_index = True) if len(pred_list)  > 0 else pd.DataFrame()
+        df_params = pd.concat(param_list, ignore_index = True) if len(param_list) > 0 else pd.DataFrame()
+
+        return df_pred, df_params
+
     # --------------------------------------------------------------- probe
+
+    def catalog(self) -> dict:
+
+        # everything available right now, read from the registries and the
+        # data folders so it can't go out of date
+        #   models : registered models (ModelRegistry)
+        #   targets: EventFeatures.TARGETS
+        #   features: EventFeatures.FEATURES
+        #   signals: saved rule-based signals in data/Signals
+        #   specs  : saved model specs in data/Models
+
+        signal_path = os.path.join(self.data_path, "Signals")
+        signals     = sorted([
+            file.replace(".parquet", "") for file in os.listdir(signal_path)
+            if file.endswith(".parquet")]) if os.path.exists(signal_path) else []
+
+        df_specs = pd.DataFrame([
+            {"spec_name": spec_name, **json.load(open(os.path.join(self.model_path, spec_name, "Spec.json")))}
+            for spec_name in self.list_specs()
+            if os.path.exists(os.path.join(self.model_path, spec_name, "Spec.json"))])
+
+        catalog = {
+            "models"  : list_models(),
+            "targets" : pd.DataFrame({"target": list(TARGETS.keys())}),
+            "features": pd.DataFrame({"feature": list(FEATURES.keys())}),
+            "signals" : pd.DataFrame({"signal": signals}),
+            "specs"   : df_specs}
+
+        return catalog
 
     def list_specs(self) -> list:
 

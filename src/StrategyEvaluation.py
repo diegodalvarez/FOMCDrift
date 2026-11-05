@@ -6,6 +6,8 @@ Measures the results of any signals or models, independent of how many there
 are or how they were built.
 
     backtest          trade one or more sources on the vol normalized returns
+    feature_set_returns  minute returns for every feature set x model from
+                      EventModels.fit_feature_sets
     sharpe_table      annualized Sharpe at the minute or event level
     cumulative_pnl    date x strategy PnL, for plotting
     prediction_loss   MSE (ols) / log-loss (logit) and hit rate by split
@@ -30,6 +32,7 @@ import pandas as pd
 
 from EventFeatures import EVENT_COLS
 from EventModels import EventModels
+from ModelRegistry import get_model
 from SignalGenerator import SignalGenerator
 
 MINUTE_ANNUALIZER = np.sqrt(390 * 8)  # matches the existing notebook tables
@@ -65,7 +68,7 @@ class StrategyEvaluation:
             if os.path.exists(signal_path):
                 return (self.signal_generator
                     .load_signal(source)
-                    .assign(model = "rule"))
+                    .assign(model = "signal"))
 
             raise ValueError("{} is not a saved model spec or signal".format(source))
 
@@ -117,6 +120,51 @@ class StrategyEvaluation:
             raise ValueError("no source produced any trades for scheme {}".format(scheme))
 
         return pd.concat(df_list, ignore_index = True)
+
+    def feature_set_returns(
+            self,
+            df_pred  : pd.DataFrame,
+            scheme   : str  = "in_sample",
+            vol_types: list = None,
+            by       : list = ["feature_set", "model"]) -> pd.DataFrame:
+
+        # Minute returns for every feature set x model in df_pred (from
+        # EventModels.fit_feature_sets, or any event-level table with
+        # EVENT_COLS + signal + the by columns). Loads the vol normalized
+        # returns of scheme once and trades sign(signal) * vol_rtn, the same
+        # as SignalGenerator.apply_event_signal. Returns one row per minute x
+        # strategy with date, by, strategy, signal, position, vol_rtn,
+        # signal_rtn
+
+        missing = [col for col in EVENT_COLS + ["signal"] + by if col not in df_pred.columns]
+        if len(missing) > 0:
+            raise ValueError("df_pred is missing {}".format(missing))
+
+        if "scheme" in df_pred.columns:
+            df_pred = df_pred.loc[lambda x: x.scheme == scheme]
+
+        # strategy label built at the event level (far fewer rows than minutes)
+        df_signal = (df_pred
+            [EVENT_COLS + by + ["signal"]]
+            .assign(
+                meeting_id = lambda x: x.meeting_id.astype(int),
+                strategy   = lambda x: x[by].astype(str).agg(" | ".join, axis = 1)))
+
+        vol_cols   = ["date", "contract", "split"] + EVENT_COLS + ["vol_rtn"]
+        df_vol_rtn = self.signal_generator._get_vol_rtn(scheme)
+        df_vol_rtn = df_vol_rtn[[col for col in vol_cols if col in df_vol_rtn.columns]]
+
+        if vol_types is not None:
+            df_signal  = df_signal.loc[lambda x: x.vol_type.isin(vol_types)]
+            df_vol_rtn = df_vol_rtn.loc[lambda x: x.vol_type.isin(vol_types)]
+
+        df_out = (df_vol_rtn
+            .merge(right = df_signal, how = "inner", on = EVENT_COLS)
+            .assign(
+                position   = lambda x: np.sign(x.signal),
+                signal_rtn = lambda x: x.position * x.vol_rtn))
+
+        return df_out
 
     # ------------------------------------------------------------- results
 
@@ -200,9 +248,11 @@ class StrategyEvaluation:
 
     def prediction_loss(self, source, by: list = ["scheme", "model", "split"]) -> pd.DataFrame:
 
-        # source: fit_quick predictions or a saved spec name. Needs target,
-        # prediction and model. ols: MSE and sign hit rate; logit: log-loss
-        # and hit rate of p > 0.5 against target > 0
+        # source: fit_quick / fit_feature_sets predictions or a saved spec
+        # name. Needs target, prediction and model. Each model scores itself
+        # with its loss in ModelRegistry (ols: mse + hit rate, logit:
+        # log-loss + hit rate, rule: hit rate); metrics a model doesn't
+        # report are NaN
 
         df_pred = self._resolve(source)
 
@@ -210,37 +260,18 @@ class StrategyEvaluation:
         if len(missing) > 0:
             raise ValueError("source is missing {}".format(missing))
 
-        # newer pandas drops the grouping columns inside apply, so the model
-        # is read from a copy
-        def _loss(df: pd.DataFrame) -> pd.Series:
+        group_cols = list(dict.fromkeys(by + ["model"]))
+        rows       = []
 
-            model = df.model_.iloc[0]
-            y     = df.target
-            pred  = df.prediction
+        for group_keys, df_group in df_pred.dropna(subset = ["target", "prediction"]).groupby(group_cols):
 
-            if model == "logit":
+            group_keys = group_keys if isinstance(group_keys, tuple) else (group_keys,)
+            keys       = dict(zip(group_cols, group_keys))
+            metrics    = get_model(keys["model"]).loss(df_group.target, df_group.prediction)
 
-                y_bin = (y > 0).astype(int)
-                p     = pred.clip(1e-12, 1 - 1e-12)
+            rows.append({**keys, "n_events": len(df_group), **metrics})
 
-                return pd.Series({
-                    "n_events": len(df),
-                    "mse"     : np.nan,
-                    "log_loss": -(y_bin * np.log(p) + (1 - y_bin) * np.log(1 - p)).mean(),
-                    "hit_rate": ((p > 0.5).astype(int) == y_bin).mean()})
-
-            return pd.Series({
-                "n_events": len(df),
-                "mse"     : ((y - pred) ** 2).mean(),
-                "log_loss": np.nan,
-                "hit_rate": (np.sign(pred) == np.sign(y)).mean()})
-
-        df_out = (df_pred
-            .dropna(subset = ["target", "prediction"])
-            .assign(model_ = lambda x: x.model)
-            .groupby(by)
-            .apply(_loss)
-            .reset_index())
+        df_out = pd.DataFrame(rows)
 
         return df_out
 

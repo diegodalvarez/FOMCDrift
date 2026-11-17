@@ -61,19 +61,57 @@ def _nonzero_count(s: pd.Series) -> int:
 
     return int((s != 0).sum())
 
+def _nonzero_median(s: pd.Series) -> float:
+
+    # median over minutes with a non-zero return (NaN if every minute is zero)
+    s = s.loc[s != 0]
+    return s.median() if len(s) > 0 else np.nan
+
+def _skew(s: pd.Series) -> float:
+
+    # sample skew of the minute returns (same estimator as pandas .skew()),
+    # NaN with fewer than 3 minutes or no variation
+    s = s.dropna()
+    if len(s) < 3 or s.std() == 0: return np.nan
+    return s.skew()
+
+def _winsorized_skew(s: pd.Series, q: float = 0.01) -> float:
+
+    # skew after clipping the minute returns at their q / 1 - q quantiles, so
+    # one or two jump minutes can't set the whole value
+    s = s.dropna()
+    if len(s) < 3: return np.nan
+
+    lower, upper = s.quantile([q, 1 - q])
+    s_clip       = s.clip(lower = lower, upper = upper)
+
+    return np.nan if s_clip.std() == 0 else s_clip.skew()
+
 # endog candidates: aggregation of the event's minute vol_rtn. The _nz
 # versions drop minutes with a zero return; sums are unaffected by zeros so
 # there is no cum_rtn_nz
 TARGETS = {
-    "cum_rtn"    : "sum",
-    "mean_rtn"   : "mean",
-    "mean_rtn_nz": _nonzero_mean,
-    "n_bars_nz"  : _nonzero_count}
+    "cum_rtn"      : "sum",
+    "mean_rtn"     : "mean",
+    "mean_rtn_nz"  : _nonzero_mean,
+    "n_bars_nz"    : _nonzero_count,
+    "median_rtn_nz": _nonzero_median,
+    "std_rtn"      : "std",            # minute vol of the vol normalized returns (vol surprise)
+    "skew_rtn"     : _skew,
+    "skew_rtn_w"   : _winsorized_skew} # 1% / 99% winsorized
 
 # exog candidates: functions of the event table, prior events only
 FEATURES = {
-    "lag_mean_rtn"   : lambda df: _prior_event(df, "mean_rtn"),
-    "lag_mean_rtn_nz": lambda df: _prior_event(df, "mean_rtn_nz")}
+    "lag_mean_rtn"     : lambda df: _prior_event(df, "mean_rtn"),
+    "lag_mean_rtn_nz"  : lambda df: _prior_event(df, "mean_rtn_nz"),
+    "lag_median_rtn_nz": lambda df: _prior_event(df, "median_rtn_nz"),
+    "lag_std_rtn"      : lambda df: _prior_event(df, "std_rtn"),
+    "lag_skew_rtn"     : lambda df: _prior_event(df, "skew_rtn"),
+    "lag_skew_rtn_w"   : lambda df: _prior_event(df, "skew_rtn_w"),
+
+    # prior event mean scaled by its own vol: does the drift carry more
+    # weight after a volatile event
+    "lag_mean_x_std"   : lambda df: _prior_event(df, "mean_rtn") * _prior_event(df, "std_rtn")}
 
 
 class EventFeatures:

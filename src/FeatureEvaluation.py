@@ -298,3 +298,225 @@ class FeatureEvaluator:
             if verbose: print("Saving data\n")
 
         return out
+
+    # -------------------------------------------------------- association
+
+    def _wide(self, feature: str) -> tuple:
+
+        # meeting_id x group arrays for the feature and the target, aligned on
+        # the same rows and columns. Infinite values are treated as missing
+        df_wide = (self.data
+            .assign(**{
+                feature    : lambda x: x[feature].replace([np.inf, -np.inf], np.nan),
+                self.target: lambda x: x[self.target].replace([np.inf, -np.inf], np.nan)})
+            .set_index(["meeting_id"] + GROUP_COLS)
+            [[feature, self.target]]
+            .unstack(GROUP_COLS)
+            .sort_index())
+
+        x      = df_wide[feature].to_numpy(dtype = float)
+        y      = df_wide[self.target].to_numpy(dtype = float)
+        groups = df_wide[feature].columns.to_frame(index = False)
+
+        return x, y, groups
+
+    def _col_corr(self, x: np.ndarray, y: np.ndarray, mask: np.ndarray) -> np.ndarray:
+
+        # column-wise Pearson correlation using only rows where both exist
+        with np.errstate(invalid = "ignore", divide = "ignore"):
+
+            n  = mask.sum(axis = 0)
+            xm = np.where(mask, x, 0).sum(axis = 0) / n
+            ym = np.where(mask, y, 0).sum(axis = 0) / n
+            xd = np.where(mask, x - xm, 0)
+            yd = np.where(mask, y - ym, 0)
+
+            cov = (xd * yd).sum(axis = 0)
+            den = np.sqrt((xd ** 2).sum(axis = 0) * (yd ** 2).sum(axis = 0))
+            r   = cov / den
+
+        r[(den == 0) | (n < 3)] = np.nan
+
+        return r
+
+    def _assoc_stats(self, x: np.ndarray, y: np.ndarray) -> dict:
+
+        # per group: events, Pearson, Spearman (Pearson on ranks of the shared
+        # rows) and sign agreement (rows where both are non-zero)
+        mask = ~np.isnan(x) & ~np.isnan(y)
+
+        x_rank = pd.DataFrame(np.where(mask, x, np.nan)).rank(axis = 0).to_numpy()
+        y_rank = pd.DataFrame(np.where(mask, y, np.nan)).rank(axis = 0).to_numpy()
+
+        signed = mask & (np.sign(np.where(mask, x, 0)) != 0) & (np.sign(np.where(mask, y, 0)) != 0)
+        n_sign = signed.sum(axis = 0)
+
+        with np.errstate(invalid = "ignore", divide = "ignore"):
+            agree = (signed & (np.sign(np.where(signed, x, 0)) == np.sign(np.where(signed, y, 0)))).sum(axis = 0) / n_sign
+
+        return {
+            "n"         : mask.sum(axis = 0),
+            "pearson"   : self._col_corr(x, y, mask),
+            "spearman"  : self._col_corr(x_rank, y_rank, mask),
+            "sign_agree": agree,
+            "n_sign"    : n_sign}
+
+    def _pool(self, stats: dict, keep: np.ndarray) -> dict:
+
+        # equal weight average across the groups kept, so groups with larger
+        # returns don't dominate
+        with np.errstate(invalid = "ignore"):
+            return {
+                "pearson"       : np.nanmean(stats["pearson"][keep])    if keep.any() else np.nan,
+                "spearman"      : np.nanmean(stats["spearman"][keep])   if keep.any() else np.nan,
+                "sign_agree"    : np.nanmean(stats["sign_agree"][keep]) if keep.any() else np.nan,
+                "share_positive": np.nanmean(stats["pearson"][keep] > 0) if keep.any() else np.nan}
+
+    def association(
+            self,
+            features        : list,
+            n_perm          : int  = 1000,
+            null            : str  = "permute",
+            min_obs         : int  = 30,
+            include_baseline: bool = True,
+            seed            : int  = 0,
+            save            : bool = False,
+            verbose         : bool = True) -> dict:
+
+        # Model-free association between each feature and the target, per
+        # ticker x zone x name x vol_type group and pooled across groups.
+        #
+        # Per group: Pearson, Spearman (rank) and sign agreement, the share of
+        # events where sign(feature) == sign(target), both non-zero.
+        # Pooled: equal weight mean across groups with at least min_obs events,
+        # plus the share of groups with a positive correlation.
+        #
+        # p-values come from an empirical null built n_perm times:
+        #   null = "permute": shuffle which meeting the feature belongs to. The
+        #          same shuffle is used for every group, so all contracts and
+        #          zones of a meeting move together and the cross-sectional
+        #          correlation is kept
+        #   null = "shift"  : rotate the meetings by a random offset instead,
+        #          which also keeps the feature's own autocorrelation
+        # Two-sided: |null| >= |observed| (sign agreement around 0.5).
+        #
+        # include_baseline adds the baseline features as rows (role =
+        # baseline) so candidates can be read against them.
+        #
+        # Returns {"summary": one row per feature,
+        #          "groups" : one row per feature x group,
+        #          "null"   : one row per feature x draw, the pooled null stats}
+
+        if null not in ["permute", "shift"]:
+            raise ValueError("null must be permute or shift")
+
+        n_dup = int(self.data.duplicated(subset = EVENT_COLS).sum())
+        if n_dup > 0:
+            raise ValueError("There are {} duplicated events, run hygiene".format(n_dup))
+
+        roles = {feature: "candidate" for feature in features}
+        if include_baseline:
+            roles = {**{feature: "baseline" for feature in self.baseline if feature not in roles}, **roles}
+
+        bad = [col for col in roles if col not in self.data.columns or not pd.api.types.is_numeric_dtype(self.data[col])]
+        if len(bad) > 0:
+            raise ValueError("{} missing or not numeric, run hygiene".format(bad))
+
+        if verbose:
+            print("Feature association on {} events ({}), {} {} draws".format(len(self.data), self.scheme, n_perm, null))
+
+        rng = np.random.default_rng(seed)
+        summary_rows, group_list, null_list = [], [], []
+
+        for feature, role in roles.items():
+
+            x, y, groups = self._wide(feature)
+            n_meet       = x.shape[0]
+
+            obs  = self._assoc_stats(x, y)
+            keep = obs["n"] >= min_obs
+            pool = self._pool(obs, keep)
+
+            # null draws, the same rng stream so every feature sees its own
+            # draws but the run is reproducible
+            null_rows  = []
+            null_group = np.full((n_perm, x.shape[1]), np.nan)
+
+            for draw in range(n_perm):
+
+                if null == "permute":
+                    order = rng.permutation(n_meet)
+                else:
+                    order = np.roll(np.arange(n_meet), rng.integers(1, n_meet))
+
+                stats_null       = self._assoc_stats(x[order], y)
+                null_group[draw] = stats_null["pearson"]
+                null_rows.append({"draw": draw, **self._pool(stats_null, keep)})
+
+            df_null = pd.DataFrame(null_rows).assign(feature = feature)
+
+            def p_value(stat: str, centre: float = 0.0) -> float:
+                if pd.isna(pool[stat]): return np.nan
+                hits = (df_null[stat] - centre).abs() >= abs(pool[stat] - centre)
+                return (1 + hits.sum()) / (1 + df_null[stat].notna().sum())
+
+            with np.errstate(invalid = "ignore"):
+                p_group = (1 + (np.abs(null_group) >= np.abs(obs["pearson"])).sum(axis = 0)) / (1 + np.isfinite(null_group).sum(axis = 0))
+            p_group[np.isnan(obs["pearson"])] = np.nan
+
+            df_group = (groups
+                .assign(
+                    feature    = feature,
+                    role       = role,
+                    n          = obs["n"],
+                    pearson    = obs["pearson"],
+                    spearman   = obs["spearman"],
+                    sign_agree = obs["sign_agree"],
+                    n_sign     = obs["n_sign"],
+                    p_pearson  = p_group,
+                    pooled     = keep))
+
+            row = {
+                "feature"         : feature,
+                "role"            : role,
+                "events"          : int(obs["n"].sum()),
+                "groups"          : int(keep.sum()),
+                "pearson"         : pool["pearson"],
+                "p_pearson"       : p_value("pearson"),
+                "spearman"        : pool["spearman"],
+                "p_spearman"      : p_value("spearman"),
+                "sign_agree"      : pool["sign_agree"],
+                "p_sign_agree"    : p_value("sign_agree", 0.5),
+                "share_positive"  : pool["share_positive"],
+                "null_sd_pearson" : df_null.pearson.std(),
+                "groups_p_below_5": int((p_group[keep] < 0.05).sum())}
+
+            summary_rows.append(row)
+            group_list.append(df_group)
+            null_list.append(df_null)
+
+            if verbose:
+                print("{} ({}): corr {:.3f} (p {:.3f}), rank corr {:.3f} (p {:.3f}), sign agree {:.1%} (p {:.3f}), positive in {:.0%} of {} groups".format(
+                    feature, role,
+                    row["pearson"], row["p_pearson"],
+                    row["spearman"], row["p_spearman"],
+                    row["sign_agree"], row["p_sign_agree"],
+                    row["share_positive"], row["groups"]))
+
+        out = {
+            "summary": pd.DataFrame(summary_rows),
+            "groups" : pd.concat(group_list, ignore_index = True),
+            "null"   : pd.concat(null_list , ignore_index = True)}
+
+        if save:
+
+            out_dir = os.path.join(self.eval_path, "Association")
+            if not os.path.exists(out_dir): os.makedirs(out_dir)
+
+            for name, df in out.items():
+                if len(df) > 0:
+                    df.to_parquet(os.path.join(out_dir, "{}.parquet".format(name.capitalize())), engine = "pyarrow")
+
+            if verbose: print("Saving data\n")
+
+        return out
